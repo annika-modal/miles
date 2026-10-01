@@ -62,7 +62,7 @@ def collect_env_report_snapshot(args: Any) -> EnvReportSnapshot:
         argv=redact_argv(sys.argv),
         args=_dump_args(args),
         env_vars=redact_env_vars(env_vars),
-        launcher_env_report=read_launcher_report(args.env_report),
+        launcher_env_report=read_launcher_report(args.env_report or environ.get(LAUNCHER_REPORT_ENV_VAR, "")),
     )
     return EnvReportSnapshot(facts=facts, probe_env={k: v for k, v in environ.items() if k != "PYTHONPATH"})
 
