@@ -130,10 +130,8 @@ def _make_controller(
         cell_provider=make_provider(),
         cell_operations=AsyncMock(),
     )
-    group._health_checker_config = compute_trainer_health_checker_config(
-        group.args, expected_num_cells=group._expected_num_cells
-    )
-    if group._expected_num_cells > 1:
+    group._health_checker_config = compute_trainer_health_checker_config(group.args)
+    if group.args.indep_dp:
         group._indep_dp_store, group._indep_dp_store_addr = group_module.create_tcp_store()
     for cell_index in range(num_cells):
         cell = group._create_cell(
@@ -216,11 +214,11 @@ class TestIndepDPStore:
 
         assert group._indep_dp_store_addr == train_conftest.FAKE_STORE_ADDR
 
-    def test_a_single_cell_pool_needs_no_quorum_store(self):
-        """One cell never renegotiates a quorum, so binding a port for it would be pure waste."""
+    def test_a_single_cell_independent_dp_pool_gets_a_quorum_store(self):
+        """An independent DP pool needs its store even when only one cell starts."""
         group = _make_controller(num_cells=1)
 
-        assert group._indep_dp_store_addr is None
+        assert group._indep_dp_store_addr == train_conftest.FAKE_STORE_ADDR
 
 
 class TestInit:

@@ -566,7 +566,7 @@ def test_sampling_config_accepts_runtime_args_without_train_minimum_tokens(min_t
         )
     )
     if min_tokens is None:
-        config = VerifiersRolloutFn._sampling_config(SamplingConfig, args)
+        config = VerifiersRolloutFn._sampling_config(SamplingConfig, args, min_tokens=None)
     else:
         config = VerifiersRolloutFn._sampling_config(SamplingConfig, args, min_tokens=min_tokens)
 
