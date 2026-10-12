@@ -58,9 +58,9 @@ def register_ci_gate(
     `rel` / `abs_floor` written. An omitted `steps` / `constraint` is filled from
     :data:`GATE_DEFAULTS` when `metric_key` has an entry there; the Python
     defaults of None exist only so a one-liner call runs as a no-op -- the
-    parser, not this signature, decides validity. `enforce` and
-    `allowlist_reason` are policy metadata the gate carries without acting on
-    (the verdict is informational this round).
+    parser, not this signature, decides validity. `enforce` opts into harness
+    enforcement after five trusted baselines; `allowlist_reason` is optional
+    explanatory metadata. Neither field changes the baseline coordinate.
     """
     return None
 

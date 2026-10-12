@@ -243,6 +243,7 @@ def evaluate_gate(
     executing_suite: str,
     registry: CIRegistry | None = None,
     history_limit: int = 20,
+    specs: list[CiGateSpec] | None = None,
 ) -> GateResult:
     """Evaluate every `register_ci_gate` spec in `test_filename` against a record.
 
@@ -268,9 +269,11 @@ def evaluate_gate(
     `merged_record_path` is the merged per-run JSONL of the passed attempt --
     the gate never globs a base directory to find it. `store` answers the
     baseline query and nothing else (no writes, no connection opened here). A
-    fanned-out spec contributes one MetricGateResult per step.
+    fanned-out spec contributes one MetricGateResult per step. The harness may
+    pass already parsed `specs` to bind enforcement and evaluation to one parse.
     """
-    specs = parse_ci_gate_specs(test_filename)
+    if specs is None:
+        specs = parse_ci_gate_specs(test_filename)
     if not specs:
         # No gate spec can regress, so identity is informational here and must
         # never raise on a dual-register / no-register file. Use the harness's

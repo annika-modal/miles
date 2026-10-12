@@ -23,11 +23,11 @@ register_cuda_ci(
 )
 register_rocm_ci(est_time=700, suite="nightly-stage-c-4-gpu-mi350", labels=["megatron", "model-scripts"])
 
-register_ci_gate(metric_key="train/grad_norm")
-register_ci_gate(metric_key="train/ppo_kl")
-register_ci_gate(metric_key="train/train_rollout_logprob_abs_diff")
-register_ci_gate(metric_key="train/train_rollout_kl")
-register_ci_gate(metric_key="rollout/raw_reward")
+register_ci_gate(metric_key="train/grad_norm", enforce=True)
+register_ci_gate(metric_key="train/ppo_kl", enforce=True)
+register_ci_gate(metric_key="train/train_rollout_logprob_abs_diff", enforce=True)
+register_ci_gate(metric_key="train/train_rollout_kl", enforce=True)
+register_ci_gate(metric_key="rollout/raw_reward", enforce=True)
 
 prepare = base.prepare
 execute = base.execute

@@ -6,8 +6,8 @@ register_cuda_ci(
     est_time=1400, suite="stage-c-4-gpu-h200", labels=["sglang"], hardware=["hopper", "blackwell"], num_gpus=4
 )
 register_rocm_ci(est_time=500, suite="nightly-stage-c-4-gpu-mi350", labels=["sglang"])
-register_ci_gate(metric_key="rollout/tito_session_mismatch_rate/v1/assistant_text")
-register_ci_gate(metric_key="rollout/tito_session_mismatch_rate/v2/assistant_text")
+register_ci_gate(metric_key="rollout/tito_session_mismatch_rate/v1/assistant_text", enforce=True)
+register_ci_gate(metric_key="rollout/tito_session_mismatch_rate/v2/assistant_text", enforce=True)
 
 
 CONFIG = ModelConfig(

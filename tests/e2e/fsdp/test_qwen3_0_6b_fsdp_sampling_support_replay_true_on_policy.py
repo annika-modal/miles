@@ -10,9 +10,9 @@ register_cuda_ci(
 )
 # The log-prob diff and both KLs stay at 0 under true-on-policy; a bf16 flip (see execute) adds only about 2e-7 to
 # the diff. ppo_kl compares the training forward with forward-only scoring, so it also covers the loss-path mask.
-register_ci_gate(metric_key="train/train_rollout_logprob_abs_diff")
-register_ci_gate(metric_key="train/train_rollout_kl")
-register_ci_gate(metric_key="train/ppo_kl")
+register_ci_gate(metric_key="train/train_rollout_logprob_abs_diff", enforce=True)
+register_ci_gate(metric_key="train/train_rollout_kl", enforce=True)
+register_ci_gate(metric_key="train/ppo_kl", enforce=True)
 
 MODEL_NAME = "Qwen3-0.6B"
 NUM_GPUS = 2

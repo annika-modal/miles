@@ -5,8 +5,8 @@ from tests.e2e.sglang.test_session_server_multi_role._common import ModelConfig,
 register_cuda_ci(
     est_time=1050, suite="stage-c-2-gpu-h200", labels=["sglang"], hardware=["hopper", "blackwell"], num_gpus=2
 )
-register_ci_gate(metric_key="rollout/tito_session_mismatch_rate/v1/assistant_text")
-register_ci_gate(metric_key="rollout/tito_session_mismatch_rate/v2/assistant_text")
+register_ci_gate(metric_key="rollout/tito_session_mismatch_rate/v1/assistant_text", enforce=True)
+register_ci_gate(metric_key="rollout/tito_session_mismatch_rate/v2/assistant_text", enforce=True)
 
 
 # This suite reserves two H200s, but Nano fits one GPU and has no MTP head, so

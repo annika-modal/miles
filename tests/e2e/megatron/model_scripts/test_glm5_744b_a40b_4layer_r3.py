@@ -24,11 +24,11 @@ register_cuda_ci(
     num_gpus=2,
 )
 
-register_ci_gate(metric_key="train/grad_norm")
-register_ci_gate(metric_key="train/ppo_kl")
-register_ci_gate(metric_key="train/train_rollout_logprob_abs_diff")
-register_ci_gate(metric_key="train/train_rollout_kl")
-register_ci_gate(metric_key="rollout/raw_reward")
+register_ci_gate(metric_key="train/grad_norm", enforce=True)
+register_ci_gate(metric_key="train/ppo_kl", enforce=True)
+register_ci_gate(metric_key="train/train_rollout_logprob_abs_diff", enforce=True)
+register_ci_gate(metric_key="train/train_rollout_kl", enforce=True)
+register_ci_gate(metric_key="rollout/raw_reward", enforce=True)
 
 
 def _args() -> ScriptArgs:
