@@ -52,7 +52,7 @@ register_ci_gate(
     constraint={"abs_floor_up": 0.02, "rel_down": 0.8, "abs_floor_down": 0.02},
 )
 
-register_ci_gate(metric_key="rollout/raw_reward", enforce=True)  # opt in to CI failure after 5 trusted baselines
+register_ci_gate(metric_key="rollout/raw_reward")  # automatically fails CI after 10 trusted baselines
 ```
 
 
@@ -216,20 +216,20 @@ Use $neon-access to show the 10 most recent metric-history runs for tests/e2e/me
 
 ## Rollout
 
-**Goal:** enforce calibrated declarations while new or unselected coordinates continue collecting history.
+**Goal:** automatically fail CI once a coordinate has enough trusted history.
 
-`register_ci_gate(..., enforce=True)` opts that declaration into enforcement; the default remains `False`. This marker is the allowlist: there is no separate list to synchronize. It does not change the baseline key, constraint, or trusted-history selection. Remove the marker to return a declaration to observation mode.
+Every `register_ci_gate(...)` declaration defaults to `enforce=True`; tests and PRs need no opt-in marker or allowlist. Numerical regressions fail CI once the coordinate has **10 trusted baseline values**. The existing explicit `enforce=False` override is an escape hatch, not the rollout mechanism. Policy metadata never changes the baseline key or comparison band.
 
-- An opted-in coordinate with at least **5 trusted baseline values** fails the test when its historical comparison fails. With fewer than 5, the historical verdict still controls baseline trust, but cannot fail CI; the summary explicitly reports insufficient history. Each step is counted independently.
-- Missing, empty, invalid or non-finite metrics in an opted-in declaration fail the test. With a configured store, record-merge, gate-evaluation and database errors also fail an opted-in test instead of silently bypassing enforcement. Unselected declarations retain their informational behavior.
-- For opted-in tests, the harness reports the verdict and metric details before attempting a baseline write. Nightly/weekly still persist valid values with the original trusted/untrusted verdict, including numerical regressions that fail enforcement. Ordinary PR and release runs do not write baselines. Enforcement failures participate in the existing suite fail-fast/continue policy and are not retried as successful test processes. Invalid gate declarations fail CI because their enforcement policy cannot be determined.
-- Without `NEON_DATABASE_URL`, local and secretless runs cannot query history; the harness explicitly reports that the history gate is skipped. Such a run does not provide enforcement evidence. CPU and ROCm behavior is unchanged.
+- Below 10 trusted values, the comparison still controls baseline trust but does not fail CI for numerical drift; the summary explicitly reports insufficient history. Each step and executing suite is counted independently.
+- Missing, empty, invalid or non-finite metrics fail tests with enforcement enabled. With a configured store, record-merge, gate-evaluation and database errors also fail instead of silently bypassing the gate.
+- The harness reports the verdict and metric details before writing a baseline. Nightly/weekly retain the original trusted/untrusted verdict, including numerical regressions that fail enforcement. Ordinary PR and release runs only read history. Gate failures affect suite exit status, honor fail-fast/continue policy, and do not retry successful child processes. Invalid declarations fail CI.
+- Without `NEON_DATABASE_URL`, local and secretless runs explicitly skip the history gate; they do not provide enforcement evidence. CPU and ROCm behavior is unchanged.
 
-The initial rollout opts in selected CUDA tests using their existing declarations. This gate controls CI job results; repository required-status-check settings separately determine whether those results block merging.
+The gate controls executed CI job results. Test selection and repository required-status-check settings separately determine which jobs run and whether their failure blocks merging.
 
 ## Replay golden history
 
-From the repository root, export a read-only query for the currently enabled CUDA tests with `enforce=True` declarations:
+From the repository root, export a read-only query for the currently enabled CUDA tests with metric gate declarations (excluding explicit `enforce=False` overrides):
 
 ```bash
 python -m tests.ci.metric_history.replay --export-sql > /tmp/golden-replay.sql
@@ -241,9 +241,9 @@ Execute that exact SQL through the existing **Neon access** workflow and decrypt
 python -m tests.ci.metric_history.replay --input /tmp/result.json > /tmp/golden-replay-report.json
 ```
 
-The replay checks each stored golden value against up to 20 strictly earlier trusted values of the identical test/backend/executing-suite/metric/steps/constraint/step coordinate, using the production comparison function. Current and future rows never enter a candidate's baseline; rows with the same timestamp cannot establish an ordering and are excluded from each other's history. A tie split by the 20-value window boundary is rejected because the production query does not specify a tie-breaker. Zero-history values are cold starts, not passing checks. Comparisons with one to four predecessors still check historical trust consistency, but are marked insufficient for enforcement. The report separates passes, failures, enforcement-eligible comparisons, insufficient history, and declarations without any enforcement-eligible comparison; failures or incomplete coverage return a nonzero exit code. A malformed, truncated, or differently scoped export is rejected.
+The replay checks each stored value, including untrusted candidates, against up to 20 strictly earlier trusted values of the identical test/backend/executing-suite/metric/steps/constraint/step coordinate, using the production comparison function. Current and future rows never enter a candidate's baseline; rows with the same timestamp cannot establish an ordering and are excluded from each other's history. A tie split by the 20-value window boundary is rejected because the production query does not specify a tie-breaker. Zero-history values are cold starts, not passing checks. Comparisons with one to nine predecessors still check historical trust consistency, but are marked insufficient for enforcement. The report separates passes, failures, enforcement-eligible comparisons, insufficient history, and declarations without any enforcement-eligible comparison; failures or incomplete coverage return a nonzero exit code. Each run is also checked for missing declared metrics and explicitly required steps; incomplete stored values are reported separately and cannot produce a fully passing report. For `steps="all"`, the stored snapshot cannot reveal absent original steps, so only declaration presence and observed steps can be checked. A malformed, truncated, or differently scoped export is rejected.
 
-The replay uses the snapshot's current `trusted` flags; it does not reconstruct later trust revocations or historical code versions, infer missing original metrics from stored values, rewrite trust, or remove failing golden values from subsequent history. All stored executing suites are kept separate. It checks self-consistency of persisted goldens under today's declarations, not the accuracy of the underlying training run. Keep the exported values and detailed report outside the repository.
+Only earlier rows with the snapshot's `trusted=True` flag enter the baseline; candidate rows are never filtered by trust. The report separates trusted-candidate inconsistencies from untrusted-candidate regressions. The replay uses the snapshot's current `trusted` flags; it does not reconstruct later trust revocations or historical code versions, infer missing original metrics from stored values, rewrite trust, or change which rows enter subsequent history. All stored executing suites are kept separate. It checks consistency of persisted records against earlier goldens under today's declarations, not the accuracy of the underlying training run. Keep the exported values and detailed report outside the repository.
 
 ## Notes
 

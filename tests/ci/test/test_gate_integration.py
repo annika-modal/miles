@@ -13,7 +13,7 @@ Covered:
   collapse to one `metric_values` row; a no-spec file writes nothing.
 * PR no-write: a `pull_request` event writes no row and emits a shadow
   verdict string.
-* enforcement: opted-in coordinates block numerical regressions only after five
+* enforcement: coordinates block numerical regressions by default after ten
   trusted baselines; metric and infrastructure errors fail closed.
 * harness: a gate failure reaches the final summary without rerunning the child.
 """
@@ -395,7 +395,7 @@ class TestBaselineWrite:
                              steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20})
             register_ci_gate(metric_key="rollout/raw_reward",
                              steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20},
-                             enforce=True)
+                             enforce=False)
             """,
         )
         registry = _registry(test_file)
@@ -490,7 +490,7 @@ class TestPrShadow:
             tmp_path,
             """
             register_ci_gate(metric_key="rollout/raw_reward",
-                             steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20})
+                             steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20}, enforce=False)
             """,
         )
         registry = _registry(test_file)
@@ -530,7 +530,7 @@ class TestShadowNeverBlocks:
             tmp_path,
             """
             register_ci_gate(metric_key="rollout/raw_reward",
-                             steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20})
+                             steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20}, enforce=False)
             """,
         )
         registry = _registry(test_file)
@@ -565,7 +565,7 @@ class TestShadowNeverBlocks:
             tmp_path,
             """
             register_ci_gate(metric_key="rollout/raw_reward",
-                             steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20})
+                             steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20}, enforce=False)
             """,
         )
         registry = _registry(test_file)
@@ -594,7 +594,7 @@ class TestShadowNeverBlocks:
             tmp_path,
             """
             register_ci_gate(metric_key="rollout/raw_reward",
-                             steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20})
+                             steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20}, enforce=False)
             """,
         )
         registry = _registry(test_file)
@@ -658,7 +658,7 @@ def test_hook_signature_matches_metric_sample_contract(tmp_path, store, monkeypa
     assert RunIdentity("p", "cuda", "s").backend == "cuda"
 
 
-# --- opted-in enforcement --------------------------------------------------
+# --- default enforcement --------------------------------------------------
 
 
 def _seed_history(store, registry, n, *, values=None):
@@ -692,21 +692,21 @@ class TestEnforcement:
         test_file = _write_test_file(
             tmp_path,
             'register_ci_gate(metric_key="rollout/raw_reward", steps="last", '
-            f'constraint={{"rel_up": 0.20, "rel_down": 0.20}}, enforce={enforce})',
+            'constraint={"rel_up": 0.20, "rel_down": 0.20}' + ("" if enforce else ", enforce=False") + ")",
         )
-        _seed_history(store, _registry(test_file), 5)
+        _seed_history(store, _registry(test_file), 10)
         record = _write_record(tmp_path, {"rollout/raw_reward": [[0, 0.90]]}, name="m.jsonl")
         monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path))
         assert _run_hook(test_file, record, store) is not enforce
 
     @pytest.mark.parametrize("enforce", [False, True])
     @pytest.mark.parametrize("write_baseline", [False, True], ids=["pr", "nightly"])
-    @pytest.mark.parametrize("n,current", [(0, 0.90), (1, 0.90), (4, 0.90), (5, 0.90), (5, 0.30)])
+    @pytest.mark.parametrize("n,current", [(0, 0.90), (1, 0.90), (9, 0.90), (10, 0.90), (10, 0.30)])
     def test_history_threshold_and_baseline_trust(self, tmp_path, store, caplog, enforce, write_baseline, n, current):
         test_file = _write_test_file(
             tmp_path,
             'register_ci_gate(metric_key="rollout/raw_reward", steps="last", '
-            f'constraint={{"rel_up": 0.20, "rel_down": 0.20}}, enforce={enforce})',
+            'constraint={"rel_up": 0.20, "rel_down": 0.20}' + ("" if enforce else ", enforce=False") + ")",
         )
         registry = _registry(test_file)
         _seed_history(store, registry, n)
@@ -715,10 +715,10 @@ class TestEnforcement:
         with caplog.at_level("INFO"):
             allowed = _run_hook(test_file, record, store, write_baseline=write_baseline)
 
-        assert allowed is not (enforce and n >= 5 and current == 0.90)
+        assert allowed is not (enforce and n >= 10 and current == 0.90)
         assert _count_runs(store) == n + int(write_baseline)
-        if enforce and n < 5:
-            assert f"NOT ENFORCED: insufficient history ({n}/5)" in caplog.text
+        if enforce and n < 10:
+            assert f"NOT ENFORCED: insufficient history ({n}/10)" in caplog.text
         if write_baseline:
             trusted = store._conn.execute("SELECT trusted FROM runs ORDER BY created_at DESC").fetchone()[0]
             assert bool(trusted) is (n == 0 or current == 0.30)
@@ -726,13 +726,15 @@ class TestEnforcement:
                 registry.filename, "cuda", registry.suite, "rollout/raw_reward", LAST_KEY, REL20_KEY, -1, 20
             )
             assert len(history) == n + int(bool(trusted))
-            if enforce and n == 4:
+            if enforce and n == 9:
                 # The newly persisted untrusted run must not satisfy the threshold.
                 assert _run_hook(test_file, record, store) is True
 
     @pytest.mark.parametrize("coordinate", ["metric", "steps", "constraint"])
     @pytest.mark.parametrize("enforce_failing", [False, True])
-    def test_mixed_specs_enforce_only_the_tagged_coordinate(self, tmp_path, store, coordinate, enforce_failing):
+    def test_explicit_shadow_override_applies_only_to_its_coordinate(
+        self, tmp_path, store, coordinate, enforce_failing
+    ):
         passing = dict(metric_key="rollout/raw_reward", steps="last", constraint={"rel_up": 0.20, "rel_down": 0.20})
         failing = dict(passing)
         by_metric = {"rollout/raw_reward": [[0, 0.30]]}
@@ -749,7 +751,10 @@ class TestEnforcement:
         samples = []
         for spec, enforced in ((passing, not enforce_failing), (failing, enforce_failing)):
             declarations.append(
-                "register_ci_gate(" + ", ".join(f"{k}={v!r}" for k, v in spec.items()) + f", enforce={enforced})"
+                "register_ci_gate("
+                + ", ".join(f"{k}={v!r}" for k, v in spec.items())
+                + ("" if enforced else ", enforce=False")
+                + ")"
             )
             samples.append(
                 MetricSample(
@@ -761,25 +766,25 @@ class TestEnforcement:
                 )
             )
         test_file = _write_test_file(tmp_path, "\n".join(declarations))
-        _seed_history(store, _registry(test_file), 5, values=samples)
+        _seed_history(store, _registry(test_file), 10, values=samples)
         record = _write_record(tmp_path, by_metric, name="m.jsonl")
         assert _run_hook(test_file, record, store) is not enforce_failing
-        assert _count_runs(store) == 5
+        assert _count_runs(store) == 10
 
     def test_history_threshold_is_per_step(self, tmp_path, store, caplog):
         test_file = _write_test_file(
             tmp_path,
             'register_ci_gate(metric_key="rollout/raw_reward", steps="all", '
-            'constraint={"rel_up": 0.20, "rel_down": 0.20}, enforce=True)',
+            'constraint={"rel_up": 0.20, "rel_down": 0.20})',
         )
         registry = _registry(test_file)
         samples = [MetricSample("rollout/raw_reward", '"all"', REL20_KEY, step, 0.30) for step in (0, 1)]
-        _seed_history(store, registry, 4, values=samples)
+        _seed_history(store, registry, 9, values=samples)
         _seed_history(store, registry, 1, values=samples[:1])
         record = _write_record(tmp_path, {"rollout/raw_reward": [[0, 0.30], [1, 0.90]]}, name="m.jsonl")
         with caplog.at_level("INFO"):
             assert _run_hook(test_file, record, store) is True
-        assert "NOT ENFORCED: insufficient history (4/5)" in caplog.text
+        assert "NOT ENFORCED: insufficient history (9/10)" in caplog.text
         _seed_history(store, registry, 1, values=samples[1:])
         assert _run_hook(test_file, record, store) is False
 
@@ -787,7 +792,9 @@ class TestEnforcement:
     @pytest.mark.parametrize("series", [None, [], [[0, "NaN"]], [[0, "Infinity"]], [[0, "-Infinity"]]])
     @pytest.mark.parametrize("write_baseline", [False, True], ids=["pr", "nightly"])
     def test_bad_selected_metrics_do_not_wait_for_history(self, tmp_path, store, enforce, series, write_baseline):
-        test_file = _write_test_file(tmp_path, f'register_ci_gate(metric_key="rollout/raw_reward", enforce={enforce})')
+        test_file = _write_test_file(
+            tmp_path, 'register_ci_gate(metric_key="rollout/raw_reward"' + ("" if enforce else ", enforce=False") + ")"
+        )
         record = _write_record(tmp_path, {} if series is None else {"rollout/raw_reward": series}, name="m.jsonl")
         assert _run_hook(test_file, record, store, write_baseline=write_baseline) is not enforce
         assert _count_runs(store) == int(write_baseline)
@@ -799,7 +806,9 @@ class TestEnforcement:
         "failure", ["record_unavailable", "record_missing", "record_malformed", "read", "write", "evaluate"]
     )
     def test_gate_io_failures_obey_enforcement(self, tmp_path, store, monkeypatch, caplog, enforce, failure):
-        test_file = _write_test_file(tmp_path, f'register_ci_gate(metric_key="rollout/raw_reward", enforce={enforce})')
+        test_file = _write_test_file(
+            tmp_path, 'register_ci_gate(metric_key="rollout/raw_reward"' + ("" if enforce else ", enforce=False") + ")"
+        )
         record = _write_record(tmp_path, {"rollout/raw_reward": [[0, 0.30]]}, name="m.jsonl")
         if failure == "record_unavailable":
             record = None
@@ -841,13 +850,13 @@ class TestHarnessEnforcement:
                 _write_test_file(
                     tmp_path,
                     'register_ci_gate(metric_key="rollout/raw_reward", steps="last", '
-                    'constraint={"rel_up": 0.20, "rel_down": 0.20}, enforce=True)',
+                    'constraint={"rel_up": 0.20, "rel_down": 0.20})',
                     name="test_regression.py",
                 )
             ),
             _registry(_write_test_file(tmp_path, "", name="test_next.py")),
         ]
-        _seed_history(store, files[0], 5)
+        _seed_history(store, files[0], 10)
         attempted = []
 
         def run_child(func, args, kwargs, timeout):
@@ -892,7 +901,7 @@ class TestHarnessEnforcement:
             assert files[1].filename not in failed
         else:
             assert "PASSED:" not in summary
-        assert _count_runs(store) == 5
+        assert _count_runs(store) == 10
 
     @pytest.mark.parametrize("current,allowed", [(0.30, True), (0.90, False)])
     def test_only_successful_child_attempt_is_gated_after_retry(
@@ -903,10 +912,10 @@ class TestHarnessEnforcement:
             _write_test_file(
                 tmp_path,
                 'register_ci_gate(metric_key="rollout/raw_reward", steps="last", '
-                'constraint={"rel_up": 0.20, "rel_down": 0.20}, enforce=True)',
+                'constraint={"rel_up": 0.20, "rel_down": 0.20})',
             )
         )
-        _seed_history(store, registry, 5)
+        _seed_history(store, registry, 10)
         attempts = []
 
         def child(*args, env, **kwargs):
@@ -936,7 +945,7 @@ class TestHarnessEnforcement:
         assert len(attempts) == 2
         assert not Path(f"{attempts[0]}.merged.jsonl").exists()
         assert Path(f"{attempts[1]}.merged.jsonl").exists()
-        assert _count_runs(store) == 6
+        assert _count_runs(store) == 11
         row = store._conn.execute(
             "SELECT mv.value, r.trusted FROM metric_values mv JOIN runs r USING (run_id) "
             "ORDER BY r.created_at DESC LIMIT 1"

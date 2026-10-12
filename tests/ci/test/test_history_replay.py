@@ -18,18 +18,15 @@ def specs(tmp_path):
     return _specs(tmp_path)
 
 
-def _specs(tmp_path, *, steps="last", name="test_synthetic.py", constraint=None):
+def _specs(tmp_path, *, steps="last", name="test_synthetic.py", constraint=None, metric="rollout/raw_reward"):
     path = tmp_path / name
     constraint = constraint or {"rel_up": 0.3, "rel_down": 0.3}
-    path.write_text(
-        f'register_ci_gate(metric_key="rollout/raw_reward", steps={steps!r}, '
-        f"constraint={constraint!r}, enforce=True)\n"
-    )
+    path.write_text(f"register_ci_gate(metric_key={metric!r}, steps={steps!r}, " f"constraint={constraint!r})\n")
     spec = parse_ci_gate_specs(str(path))[0]
     return {(str(path), spec.metric_key, spec.steps_key, spec.constraint_key): spec}
 
 
-def _row(specs, run_id, value, *, suite="stage-c-8-gpu-h100", step=-1, minute=None):
+def _row(specs, run_id, value, *, suite="stage-c-8-gpu-h100", step=-1, minute=None, trusted=True):
     declaration = next(iter(specs))
     timestamp = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(minutes=run_id if minute is None else minute)
     return dict(
@@ -40,6 +37,7 @@ def _row(specs, run_id, value, *, suite="stage-c-8-gpu-h100", step=-1, minute=No
         created_at=timestamp.isoformat(),
         github_run_id=1000 + run_id,
         github_run_attempt=1,
+        trusted=trusted,
         values=[[*declaration[1:], step, value]],
     )
 
@@ -53,6 +51,7 @@ def _envelope(specs, rows):
         "created_at",
         "github_run_id",
         "github_run_attempt",
+        "trusted",
         "values",
     ]
     return dict(
@@ -76,8 +75,12 @@ class TestDiscoveryAndExport:
         for name, declaration in declarations.items():
             path = tmp_path / f"test_{name}.py"
             path.write_text(
-                declaration + "\n" + f'register_ci_gate(metric_key="rollout/raw_reward", enforce={name != "shadow"})\n'
-                'raise RuntimeError("GPU test must never be imported")\n'
+                declaration
+                + "\n"
+                + 'register_ci_gate(metric_key="rollout/raw_reward"'
+                + (", enforce=False" if name == "shadow" else "")
+                + ")\n"
+                + 'raise RuntimeError("GPU test must never be imported")\n'
             )
             files.append(str(path))
         monkeypatch.setattr(replay, "discover_ci_files", lambda: files)
@@ -87,12 +90,14 @@ class TestDiscoveryAndExport:
         with pytest.raises(ValueError, match="no enabled CUDA"):
             replay.enforced_specs()
 
-    def test_export_is_read_only_and_filters_exact_trusted_coordinates(self, tmp_path):
+    def test_export_includes_all_candidates_and_filters_exact_coordinates(self, tmp_path):
         specs = _specs(tmp_path, name="test_quote's.py")
         sql = replay.export_sql(specs)
         assert sql.startswith("BEGIN TRANSACTION READ ONLY;")
-        assert "r.trusted = true" in sql
+        assert "r.trusted" in sql
+        assert "r.trusted" not in sql.split("WHERE", 1)[1].split("GROUP BY", 1)[0]
         assert "r.backend = 'cuda'" in sql
+        assert "LEFT JOIN metric_values" in sql
         assert "r.test_path = s.test_path" in sql
         for field in ("metric_key", "steps_key", "constraint_key"):
             assert f"mv.{field} = s.{field}" in sql
@@ -187,8 +192,8 @@ class TestChronologicalReplay:
         assert observed[-1] == [1.0] * 20
         assert all(f["run_id"] != 22 for f in report["failures"])
 
-    @pytest.mark.parametrize("length,status,eligible", [(5, "incomplete", 0), (6, "pass", 1)])
-    def test_five_prior_values_are_required_for_enforcement_coverage(self, specs, length, status, eligible):
+    @pytest.mark.parametrize("length,status,eligible", [(10, "incomplete", 0), (11, "pass", 1)])
+    def test_ten_prior_values_are_required_for_enforcement_coverage(self, specs, length, status, eligible):
         report = replay.replay([_row(specs, i, 1.0) for i in range(length)], specs)
         assert report["status"] == status
         assert report["enforcement_checked"] == eligible
@@ -199,38 +204,142 @@ class TestChronologicalReplay:
         specs = _specs(tmp_path, steps="all")
         rows = []
         for suite, step, value in (("hopper", 0, 1.0), ("hopper", 1, 100.0), ("blackwell", 0, 1000.0)):
-            for _ in range(6):
+            for _ in range(11):
                 rows.append(_row(specs, len(rows), value, suite=suite, step=step))
         report = replay.replay(list(reversed(rows)), specs)
         assert report["status"] == "pass"
         assert report["enforcement_checked"] == 3
         assert len(report["coverage"]) == 3
-        assert all(c["checked"] == c["passed"] == 5 for c in report["coverage"])
+        assert all(c["checked"] == c["passed"] == 10 for c in report["coverage"])
 
     def test_a_sparse_suite_cannot_borrow_another_suites_coverage(self, specs):
-        rows = [_row(specs, i, 1.0) for i in range(6)] + [_row(specs, 6, 1.0, suite="blackwell")]
+        rows = [_row(specs, i, 1.0) for i in range(11)] + [_row(specs, 11, 1.0, suite="blackwell")]
         report = replay.replay(rows, specs)
         assert report["status"] == "incomplete"
         assert report["coordinates_without_enforcement_checks"] == 1
 
     def test_absent_declaration_cannot_be_hidden_by_other_coverage(self, tmp_path, specs):
         other = _specs(tmp_path, name="test_other.py")
-        report = replay.replay([_row(specs, i, 1.0) for i in range(6)], specs | other)
+        report = replay.replay([_row(specs, i, 1.0) for i in range(11)], specs | other)
         assert report["status"] == "incomplete"
         assert any(d["test_path"] == next(iter(other))[0] for d in report["declarations_without_enforcement_checks"])
 
     def test_missing_explicit_step_is_incomplete(self, tmp_path):
         specs = _specs(tmp_path, steps=[0, 1])
-        report = replay.replay([_row(specs, i, 1.0, step=0) for i in range(6)], specs)
+        report = replay.replay([_row(specs, i, 1.0, step=0) for i in range(11)], specs)
         assert report["status"] == "incomplete"
         assert report["coordinates_without_enforcement_checks"] >= 1
 
     def test_missing_declaration_within_observed_suite_is_incomplete(self, tmp_path, specs):
         other = _specs(tmp_path, steps=[0], name="test_synthetic.py")
-        rows = [_row(specs, i, 1.0) for i in range(6)]
-        rows += [_row(other, i + 6, 1.0, step=0, suite="blackwell") for i in range(6)]
+        rows = [_row(specs, i, 1.0) for i in range(11)]
+        rows += [_row(other, i + 11, 1.0, step=0, suite="blackwell") for i in range(11)]
         report = replay.replay(rows, specs | other)
         assert report["status"] == "incomplete"
+
+    def test_untrusted_candidates_are_checked_without_entering_or_displacing_history(self, specs):
+        rows = [_row(specs, i, 1.0) for i in range(10)]
+        rows += [_row(specs, i, 100.0, trusted=False) for i in range(10, 35)]
+        rows.append(_row(specs, 35, 1.0))
+        report = replay.replay(rows, specs)
+        assert report["status"] == "fail"
+        assert report["untrusted_checked"] == report["untrusted_failed"] == 25
+        assert report["untrusted_enforcement_failed"] == 25
+        assert report["trusted_failed"] == report["trusted_enforcement_failed"] == 0
+        assert report["trusted_checked"] == 10
+        assert report["enforcement_checked"] == 26
+        assert [failure["run_id"] for failure in report["failures"]] == list(range(10, 35))
+        for failure in report["failures"]:
+            assert failure["trusted"] is False
+            assert failure["baseline_run_ids"] == list(reversed(range(10)))
+            assert failure["baseline_mean"] == 1.0
+
+    @pytest.mark.parametrize("n,eligible", [(9, False), (10, True)])
+    def test_trusted_and_untrusted_failures_are_classified_before_enforcement(self, specs, n, eligible):
+        rows = [_row(specs, i, 1.0) for i in range(n)]
+        rows += [_row(specs, n, 2.0, trusted=False), _row(specs, n + 1, 2.0)]
+        report = replay.replay(rows, specs)
+        assert report["status"] == "fail"
+        assert report["failed"] == 2
+        assert report["trusted_failed"] == report["untrusted_failed"] == 1
+        assert report["trusted_checked"] == n
+        assert report["untrusted_checked"] == 1
+        assert report["trusted_enforcement_failed"] == int(eligible)
+        assert report["untrusted_enforcement_failed"] == int(eligible)
+        assert report["enforcement_checked"] == 2 * int(eligible)
+        assert [failure["trusted"] for failure in report["failures"]] == [False, True]
+        for failure in report["failures"]:
+            assert failure["baseline_n"] == n
+            assert failure["enforcement_eligible"] is eligible
+        assert report["coverage"][0]["untrusted_failed"] == 1
+
+    @pytest.mark.parametrize("history_length", [0, 11])
+    def test_runs_without_values_cannot_hide_behind_other_coverage(self, specs, history_length):
+        rows = [_row(specs, i, 1.0) for i in range(history_length)]
+        empty = _row(specs, history_length, 1.0)
+        empty["values"] = []
+        report = replay.replay(rows + [empty], specs)
+        assert report["status"] == "incomplete"
+        assert report["runs"] == history_length + 1
+        assert [row["run_id"] for row in report["runs_with_missing_values"]] == [history_length]
+        assert report["enforcement_checked"] == int(history_length == 11)
+
+    @pytest.mark.parametrize("steps,expected_step", [("last", -1), ("all", None)])
+    def test_partial_missing_declaration_is_incomplete_despite_sufficient_history(
+        self, tmp_path, specs, steps, expected_step
+    ):
+        other = _specs(tmp_path, steps=steps, metric="train/grad_norm")
+        rows = [_row(specs, i, 1.0) for i in range(11)]
+        for row in rows:
+            row["values"] += _row(other, row["run_id"], 1.0, step=-1 if steps == "last" else 0)["values"]
+        rows.append(_row(specs, 11, 1.0, trusted=False))
+        report = replay.replay(rows, specs | other)
+        assert report["status"] == "incomplete"
+        assert report["failed"] == 0
+        assert report["coordinates_without_enforcement_checks"] == 0
+        missing = report["runs_with_missing_values"]
+        assert len(missing) == 1
+        assert missing[0]["run_id"] == 11
+        assert missing[0]["trusted"] is False
+        key = next(iter(other))
+        assert missing[0]["missing_values"] == [
+            dict(
+                metric_key=key[1],
+                steps_key=key[2],
+                constraint_key=key[3],
+                step=expected_step,
+            )
+        ]
+
+    def test_partial_missing_explicit_step_is_incomplete_despite_sufficient_history(self, tmp_path):
+        specs = _specs(tmp_path, steps=[0, 1])
+        rows = [_row(specs, i, 1.0, step=0) for i in range(11)]
+        for row in rows:
+            row["values"] += _row(specs, row["run_id"], 1.0, step=1)["values"]
+        rows.append(_row(specs, 11, 1.0, step=0, trusted=False))
+        report = replay.replay(rows, specs)
+        assert report["status"] == "incomplete"
+        assert report["failed"] == 0
+        assert report["coordinates_without_enforcement_checks"] == 0
+        missing = report["runs_with_missing_values"]
+        assert len(missing) == 1
+        assert missing[0]["run_id"] == 11
+        key = next(iter(specs))
+        assert missing[0]["missing_values"] == [
+            dict(
+                metric_key=key[1],
+                steps_key=key[2],
+                constraint_key=key[3],
+                step=1,
+            )
+        ]
+
+    def test_passing_untrusted_rows_do_not_bootstrap_history(self, specs):
+        rows = [_row(specs, i, 1.0, trusted=False) for i in range(11)]
+        report = replay.replay(rows, specs)
+        assert report["status"] == "incomplete"
+        assert report["values"] == report["insufficient_history"] == 11
+        assert report["checked"] == report["passed"] == report["enforcement_checked"] == 0
 
 
 class TestInvalidRows:
@@ -239,6 +348,7 @@ class TestInvalidRows:
         [
             "duplicate_run",
             "backend",
+            "trusted",
             "naive_time",
             "unknown_metric",
             "wrong_step",
@@ -257,6 +367,8 @@ class TestInvalidRows:
             rows.append(copy.deepcopy(row))
         elif fault == "backend":
             row["backend"] = "cpu"
+        elif fault == "trusted":
+            row["trusted"] = 1
         elif fault == "naive_time":
             row["created_at"] = "2026-01-01T00:01:00"
         elif fault == "unknown_metric":
@@ -277,7 +389,7 @@ class TestInvalidRows:
 
 
 class TestCLI:
-    @pytest.mark.parametrize("values,expected", [([], 2), ([1.0], 2), ([1.0] * 6, 0), ([1.0, 1.5], 1)])
+    @pytest.mark.parametrize("values,expected", [([], 2), ([1.0], 2), ([1.0] * 11, 0), ([1.0, 1.5], 1)])
     def test_exit_code_and_report(self, tmp_path, specs, monkeypatch, capsys, values, expected):
         rows = [_row(specs, index, value) for index, value in enumerate(values)]
         path = tmp_path / "export.json"

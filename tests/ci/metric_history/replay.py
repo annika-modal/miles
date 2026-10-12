@@ -1,4 +1,4 @@
-"""Replay persisted goldens against earlier history without writing to the store.
+"""Replay all persisted candidates against earlier trusted history without writing to the store.
 
 Export SQL with --export-sql, execute it through Neon access, then pass the
 complete decrypted response to --input. Run from the repository root.
@@ -19,11 +19,21 @@ from tests.ci.ci_register import HWBackend, discover_ci_files, ut_parse_one_file
 from tests.ci.metric_history.gate import HISTORY_LIMIT, MIN_ENFORCED_BASELINES, GateStatus, evaluate_coordinate
 from tests.ci.metric_history.register import CiGateSpec, parse_ci_gate_specs
 
-_COLUMNS = ["run_id", "test_path", "backend", "suite", "created_at", "github_run_id", "github_run_attempt", "values"]
+_COLUMNS = [
+    "run_id",
+    "test_path",
+    "backend",
+    "suite",
+    "created_at",
+    "github_run_id",
+    "github_run_attempt",
+    "trusted",
+    "values",
+]
 
 
 def enforced_specs() -> dict[tuple[str, str, str, str], CiGateSpec]:
-    """Use declarations as the rollout list, without importing GPU test modules."""
+    """Discover all enabled declarations without importing GPU test modules."""
     specs = {}
     for filename in sorted(discover_ci_files()):
         if not any(r.backend == HWBackend.CUDA and not r.disabled for r in ut_parse_one_file(filename)):
@@ -44,14 +54,15 @@ WITH specs(test_path, metric_key, steps_key, constraint_key) AS (VALUES
 {literals}
 )
 SELECT r.run_id, r.test_path, r.backend, r.suite, r.created_at::text,
-       r.github_run_id, r.github_run_attempt,
-       jsonb_agg(jsonb_build_array(mv.metric_key, mv.steps_key, mv.constraint_key, mv.step, mv.value)
-                 ORDER BY mv.metric_key, mv.steps_key, mv.constraint_key, mv.step) AS values
-FROM runs r JOIN metric_values mv USING (run_id)
-JOIN specs s ON r.test_path = s.test_path AND mv.metric_key = s.metric_key
-           AND mv.steps_key = s.steps_key AND mv.constraint_key = s.constraint_key
-WHERE r.backend = 'cuda' AND r.trusted = true
-GROUP BY r.run_id, r.test_path, r.backend, r.suite, r.created_at, r.github_run_id, r.github_run_attempt
+       r.github_run_id, r.github_run_attempt, r.trusted,
+       COALESCE(jsonb_agg(jsonb_build_array(mv.metric_key, mv.steps_key, mv.constraint_key, mv.step, mv.value)
+                 ORDER BY mv.metric_key, mv.steps_key, mv.constraint_key, mv.step)
+                 FILTER (WHERE mv.run_id IS NOT NULL), '[]'::jsonb) AS values
+FROM runs r LEFT JOIN metric_values mv ON mv.run_id = r.run_id
+    AND EXISTS (SELECT 1 FROM specs s WHERE r.test_path = s.test_path AND mv.metric_key = s.metric_key
+                AND mv.steps_key = s.steps_key AND mv.constraint_key = s.constraint_key)
+WHERE r.backend = 'cuda' AND r.test_path IN (SELECT test_path FROM specs)
+GROUP BY r.run_id, r.test_path, r.backend, r.suite, r.created_at, r.github_run_id, r.github_run_attempt, r.trusted
 ORDER BY r.created_at, r.run_id;
 COMMIT;
 """
@@ -73,9 +84,12 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
     coordinates = defaultdict(list)
     seen_runs = set()
     suites_by_test = defaultdict(set)
+    runs_with_missing_values = []
     for row in rows:
         if row["run_id"] in seen_runs or row["backend"] != "cuda":
             raise ValueError("duplicate run or unexpected backend in export")
+        if not isinstance(row["trusted"], bool):
+            raise ValueError("trusted must be a boolean")
         seen_runs.add(row["run_id"])
         suites_by_test[row["test_path"]].add(row["suite"])
         timestamp = datetime.fromisoformat(row["created_at"])
@@ -100,6 +114,31 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
             seen_coords.add(key)
             coordinates[key].append((timestamp, row, value))
 
+        missing_values = []
+        for declaration, spec in specs.items():
+            if declaration[0] != row["test_path"]:
+                continue
+            steps = [-1] if spec.steps == "last" else spec.steps if isinstance(spec.steps, list) else [None]
+            for step in steps:
+                present = (
+                    any(key[:4] == declaration for key in seen_coords)
+                    if step is None
+                    else (*declaration, row["suite"], step) in seen_coords
+                )
+                if not present:
+                    missing_values.append(
+                        dict(
+                            metric_key=spec.metric_key,
+                            steps_key=spec.steps_key,
+                            constraint_key=spec.constraint_key,
+                            step=step,
+                        )
+                    )
+        if missing_values:
+            runs_with_missing_values.append(
+                {**{k: v for k, v in row.items() if k != "values"}, "missing_values": missing_values}
+            )
+
     for declaration, spec in specs.items():
         steps = [-1] if spec.steps == "last" else spec.steps if isinstance(spec.steps, list) else []
         for suite in suites_by_test[declaration[0]]:
@@ -109,7 +148,19 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
     failures, coverage = [], []
     eligible_declarations = set()
     totals = dict(
-        values=0, checked=0, passed=0, failed=0, insufficient_history=0, enforcement_checked=0, enforcement_failed=0
+        values=0,
+        checked=0,
+        passed=0,
+        failed=0,
+        insufficient_history=0,
+        enforcement_checked=0,
+        enforcement_failed=0,
+        trusted_checked=0,
+        trusted_failed=0,
+        untrusted_checked=0,
+        untrusted_failed=0,
+        trusted_enforcement_failed=0,
+        untrusted_enforcement_failed=0,
     )
     for key, points in sorted(coordinates.items()):
         declaration, suite, step = key[:4], key[4], key[5]
@@ -133,9 +184,13 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
                 if result.historical_status == GateStatus.INACTIVE:
                     continue
                 stats["checked"] += 1
+                trust = "trusted" if row["trusted"] else "untrusted"
+                stats[f"{trust}_checked"] += 1
                 failed = result.historical_status != GateStatus.PASS
                 stats["failed" if failed else "passed"] += 1
                 stats["enforcement_failed"] += int(failed and eligible)
+                stats[f"{trust}_failed"] += int(failed)
+                stats[f"{trust}_enforcement_failed"] += int(failed and eligible)
                 if failed:
                     failures.append(
                         dict(
@@ -149,6 +204,7 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
                             created_at=row["created_at"],
                             github_run_id=row["github_run_id"],
                             github_run_attempt=row["github_run_attempt"],
+                            trusted=row["trusted"],
                             current=value,
                             baseline_n=result.baseline_n,
                             baseline_mean=result.baseline_mean,
@@ -157,7 +213,7 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
                             baseline_run_ids=[run_id for _, run_id, _ in history[-HISTORY_LIMIT:]][::-1],
                         )
                     )
-            history.extend((timestamp, row["run_id"], value) for timestamp, row, value in peers)
+            history.extend((timestamp, row["run_id"], value) for timestamp, row, value in peers if row["trusted"])
         coverage.append(
             dict(
                 test_path=key[0],
@@ -178,7 +234,11 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
         if (*key, suite) not in eligible_declarations
     ]
     incomplete_coordinates = sum(c["enforcement_checked"] == 0 for c in coverage)
-    status = "fail" if failures else "incomplete" if missing or incomplete_coordinates else "pass"
+    status = (
+        "fail"
+        if failures
+        else "incomplete" if missing or incomplete_coordinates or runs_with_missing_values else "pass"
+    )
     return dict(
         status=status,
         tests=len({key[0] for key in specs}),
@@ -189,6 +249,7 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
         **totals,
         declarations_without_enforcement_checks=missing,
         coordinates_without_enforcement_checks=incomplete_coordinates,
+        runs_with_missing_values=runs_with_missing_values,
         coverage=coverage,
         failures=failures,
     )

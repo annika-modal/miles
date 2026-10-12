@@ -49,7 +49,7 @@ _BACKEND_STR: dict[HWBackend, str] = {
 
 
 HISTORY_LIMIT = 20
-MIN_ENFORCED_BASELINES = 5
+MIN_ENFORCED_BASELINES = 10
 
 
 class GateStatus(Enum):

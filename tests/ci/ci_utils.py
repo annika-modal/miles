@@ -310,11 +310,12 @@ def run_gate_hook(
     provenance: RunProvenance,
     now_iso: str | None = None,
 ) -> bool:
-    """Return whether the passed CUDA test also satisfies opted-in history gates.
+    """Return whether the passed CUDA test also satisfies the enabled history gates.
 
     Baseline writers retain the full trusted/untrusted verdict. Numerical
-    enforcement needs five trusted values per coordinate; missing metrics and
-    gate/store errors fail opted-in tests. Other declarations remain shadow.
+    enforcement needs ten trusted values per coordinate; missing metrics and
+    gate/store errors fail tests with enforcement enabled. Other declarations
+    remain shadow.
     """
     try:
         specs = parse_ci_gate_specs(filename)
@@ -584,7 +585,7 @@ def run_unittest_files(
                         file_passed = True
                         if attempt_record_dir is not None:
                             # Merge only the passing process attempt. A failed merge
-                            # leaves no record, which the hook rejects for opted-in tests.
+                            # leaves no record, which the hook rejects when enforcement is enabled.
                             merged_path = f"{attempt_record_dir}.merged.jsonl"
                             try:
                                 _merge_attempt_records(attempt_record_dir, merged_path)
