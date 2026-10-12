@@ -227,6 +227,24 @@ Use $neon-access to show the 10 most recent metric-history runs for tests/e2e/me
 
 The initial rollout opts in selected CUDA tests using their existing declarations. This gate controls CI job results; repository required-status-check settings separately determine whether those results block merging.
 
+## Replay golden history
+
+From the repository root, export a read-only query for the currently enabled CUDA tests with `enforce=True` declarations:
+
+```bash
+python -m tests.ci.metric_history.replay --export-sql > /tmp/golden-replay.sql
+```
+
+Execute that exact SQL through the existing **Neon access** workflow and decrypt its result artifact locally, then run:
+
+```bash
+python -m tests.ci.metric_history.replay --input /tmp/result.json > /tmp/golden-replay-report.json
+```
+
+The replay checks each stored golden value against up to 20 strictly earlier trusted values of the identical test/backend/executing-suite/metric/steps/constraint/step coordinate, using the production comparison function. Current and future rows never enter a candidate's baseline; rows with the same timestamp cannot establish an ordering and are excluded from each other's history. A tie split by the 20-value window boundary is rejected because the production query does not specify a tie-breaker. Zero-history values are cold starts, not passing checks. Comparisons with one to four predecessors still check historical trust consistency, but are marked insufficient for enforcement. The report separates passes, failures, enforcement-eligible comparisons, insufficient history, and declarations without any enforcement-eligible comparison; failures or incomplete coverage return a nonzero exit code. A malformed, truncated, or differently scoped export is rejected.
+
+The replay uses the snapshot's current `trusted` flags; it does not reconstruct later trust revocations or historical code versions, infer missing original metrics from stored values, rewrite trust, or remove failing golden values from subsequent history. All stored executing suites are kept separate. It checks self-consistency of persisted goldens under today's declarations, not the accuracy of the underlying training run. Keep the exported values and detailed report outside the repository.
+
 ## Notes
 
 **Goal:** record accepted caveats and open questions beside the behavior they qualify; planned-but-unimplemented work lives in TODO below.

@@ -21,13 +21,12 @@ from tests.ci.metric_history import (
     RunIdentity,
     RunProvenance,
 )
-from tests.ci.metric_history.gate import GateStatus, evaluate_gate
+from tests.ci.metric_history.gate import MIN_ENFORCED_BASELINES, GateStatus, evaluate_gate
 from tests.ci.metric_history.register import parse_ci_gate_specs
 
 # Env var the training process reads to find the per-attempt record directory; kept
 # in sync with miles.utils.tracking_utils.ci_history.RECORD_DIR_ENV.
 CI_GATE_RECORD_DIR_ENV = "MILES_CI_GATE_RECORD_DIR"
-_MIN_ENFORCED_BASELINES = 5
 
 # Accelerator memory is freed by the driver asynchronously after the holders are killed.
 _REAP_SETTLE_SECONDS = 10.0
@@ -336,7 +335,7 @@ def run_gate_hook(
         ]
         failed = any(
             m.historical_status == GateStatus.ERROR
-            or (m.historical_status == GateStatus.FAIL and m.baseline_n >= _MIN_ENFORCED_BASELINES)
+            or (m.historical_status == GateStatus.FAIL and m.baseline_n >= MIN_ENFORCED_BASELINES)
             for m in enforced_metrics
         )
         if enforced_keys or not write_baseline:
@@ -351,9 +350,9 @@ def run_gate_hook(
                 if (
                     m in enforced_metrics
                     and m.historical_status != GateStatus.ERROR
-                    and m.baseline_n < _MIN_ENFORCED_BASELINES
+                    and m.baseline_n < MIN_ENFORCED_BASELINES
                 ):
-                    reason += f"; NOT ENFORCED: insufficient history ({m.baseline_n}/{_MIN_ENFORCED_BASELINES})"
+                    reason += f"; NOT ENFORCED: insufficient history ({m.baseline_n}/{MIN_ENFORCED_BASELINES})"
                 details.append(f"  - {m.metric_key} (step={m.step}, baseline_n={m.baseline_n}): {reason}")
             message = line + ("\n" + "\n".join(details) if details else "")
             logger.info(message)
