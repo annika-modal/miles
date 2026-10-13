@@ -10,8 +10,9 @@ Three cases, in the order of how much machinery each adds:
                   a self-launched sglang server outside the Ray placement group.
 
 Each case is a full ``train_async.py --fully-async`` run, so a crash anywhere in
-the dispatch/export/drain path fails the case; the gated train metrics come from
-the same runs.
+the dispatch/export/drain path fails the case. The three runs share one
+metric-history record with repeated steps, so this file declares no
+``register_ci_gate``.
 
 Requires: 8 GPUs, Qwen3-4B, GSM8K. Triggered by label: run-ci-megatron or run-ci-eval.
 """
@@ -20,7 +21,6 @@ import os
 from tempfile import TemporaryDirectory
 
 from tests.ci.ci_register import register_cuda_ci, register_rocm_ci
-from tests.ci.metric_history import register_ci_gate
 
 from miles.utils.external_utils import command_utils
 
@@ -32,12 +32,6 @@ register_cuda_ci(
     num_gpus=8,
 )
 register_rocm_ci(est_time=1500, suite="nightly-stage-c-8-gpu-mi350", labels=["megatron", "eval", "fully-async"])
-
-register_ci_gate(metric_key="train/grad_norm")
-register_ci_gate(metric_key="train/ppo_kl")
-register_ci_gate(metric_key="train/train_rollout_logprob_abs_diff")
-register_ci_gate(metric_key="train/train_rollout_kl")
-register_ci_gate(metric_key="rollout/raw_reward")
 
 FEW_GPU = command_utils.get_bool_env_var("MILES_TEST_FEW_GPU", "0")
 

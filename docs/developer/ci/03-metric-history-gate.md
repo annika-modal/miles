@@ -231,6 +231,8 @@ The gate controls executed CI job results. Test selection and repository require
 
 ## Replay golden history
 
+**Goal:** check stored goldens against their own earlier trusted history, offline and read-only.
+
 From the repository root, export a read-only query for the currently enabled CUDA tests with metric gate declarations (excluding explicit `enforce=False` overrides):
 
 ```bash
@@ -243,9 +245,15 @@ Execute that exact SQL through the existing **Neon access** workflow and decrypt
 python -m tests.ci.metric_history.replay --input /tmp/result.json > /tmp/golden-replay-report.json
 ```
 
-The replay checks each stored value, including untrusted candidates, against up to 20 strictly earlier trusted values of the identical test/backend/executing-suite/metric/steps/constraint/step coordinate, using the production comparison function. Current and future rows never enter a candidate's baseline; rows with the same timestamp cannot establish an ordering and are excluded from each other's history. A tie split by the 20-value window boundary is rejected because the production query does not specify a tie-breaker. Zero-history values are cold starts, not passing checks. Comparisons with one to nine predecessors still check historical trust consistency, but are marked insufficient for enforcement. The report separates passes, failures, enforcement-eligible comparisons, insufficient history, and declarations without any enforcement-eligible comparison; failures or incomplete coverage return a nonzero exit code. Each run is also checked for missing declared metrics and explicitly required steps; incomplete stored values are reported separately and cannot produce a fully passing report. For `steps="all"`, the stored snapshot cannot reveal absent original steps, so only declaration presence and observed steps can be checked. A malformed, truncated, or differently scoped export is rejected.
+The replay checks each stored value, including untrusted candidates, with the production comparison function:
 
-Only earlier rows with the snapshot's `trusted=True` flag enter the baseline; candidate rows are never filtered by trust. The report separates trusted-candidate inconsistencies from untrusted-candidate regressions. The replay uses the snapshot's current `trusted` flags; it does not reconstruct later trust revocations or historical code versions, infer missing original metrics from stored values, rewrite trust, or change which rows enter subsequent history. All stored executing suites are kept separate. It checks consistency of persisted records against earlier goldens under today's declarations, not the accuracy of the underlying training run. Keep the exported values and detailed report outside the repository.
+- **Baseline:** up to 20 strictly earlier trusted values of the identical test/backend/executing-suite/metric/steps/constraint/step coordinate. Current and future rows never enter a candidate's baseline; rows with the same timestamp cannot establish an ordering and are excluded from each other's history. A tie split by the 20-value window boundary is rejected because the production query does not specify a tie-breaker.
+- **Coverage:** zero-history values are cold starts, not passing checks. Comparisons with one to nine predecessors still check historical trust consistency, but are marked insufficient for enforcement. Each run is also checked for missing declared metrics and explicitly required steps; for `steps="all"`, the stored snapshot cannot reveal absent original steps, so only declaration presence and observed steps can be checked.
+- **Report:** passes, failures, enforcement-eligible comparisons, insufficient history, incomplete stored values, and declarations without any enforcement-eligible comparison are reported separately; failures or incomplete coverage return a nonzero exit code. A malformed, truncated, or differently scoped export is rejected.
+
+Only earlier rows with the snapshot's `trusted=True` flag enter the baseline; candidate rows are never filtered by trust. The report separates trusted-candidate inconsistencies from untrusted-candidate regressions. The replay uses the snapshot's current `trusted` flags; it does not reconstruct later trust revocations or historical code versions, infer missing original metrics from stored values, rewrite trust, or change which rows enter subsequent history.
+
+All stored executing suites are kept separate. The replay checks consistency of persisted records against earlier goldens under today's declarations, not the accuracy of the underlying training run. Keep the exported values and detailed report outside the repository.
 
 ## Notes
 
@@ -253,6 +261,7 @@ Only earlier rows with the snapshot's `trusted=True` flag enter the baseline; ca
 
 - A test-file edit does not reset the series: `test_file_hash` was dropped from the run-series identity because a tiny edit to a test kept wiping its whole history. A test change that genuinely shifts a metric's expected level surfaces as gate failures instead; the reset levers are manual — `mark_untrusted` the stale runs, or edit the declaration literals (new `steps_key` / `constraint_key` ⇒ fresh coordinate).
 - Baseline writing is selected by the resolved CI policy rather than inferred from `GITHUB_EVENT_NAME`; nightly and weekly write, while regular and release runs only read history. Enforcement follows each declaration in either mode.
+- One test attempt yields one merged record: a file that launches training more than once concatenates the runs' series, so a step repeats and a `steps="all"` selection is an ERROR. Such a file declares no gate unless each run logs distinct metric keys, as the session TITO tests do.
 - Open: should a brand-new test's first baselines need human confirmation before counting as trusted? (v1: no.)
 
 
