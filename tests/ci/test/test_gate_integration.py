@@ -22,12 +22,15 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
+import sys
 import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.ci import ci_utils
+import yaml
+from tests.ci import ci_utils, run_suite
 from tests.ci.ci_register import HWBackend, register_cpu_ci, ut_parse_one_file
 from tests.ci.ci_utils import build_store_from_env, gate_provenance_from_env, run_gate_hook
 from tests.ci.metric_history import MetricSample, RunIdentity, RunProvenance, SQLiteMetricHistoryStore
@@ -953,3 +956,54 @@ class TestHarnessEnforcement:
         assert row == (current, int(allowed))
         assert f"(2 attempts, {'passed' if allowed else 'failed'})" in caplog.text
         assert f"Test Summary: {int(allowed)}/1 passed" in caplog.text
+
+
+@pytest.mark.parametrize("nightly", [False, True])
+@pytest.mark.parametrize(
+    "baseline_n,current,allowed", [(9, 0.90, True), (10, 0.90, False), (10, 0.30, True), (10, None, False)]
+)
+def test_comment_file_command_runs_gate_without_writing_history(
+    tmp_path, store, monkeypatch, caplog, nightly, baseline_n, current, allowed
+):
+    workflow = yaml.safe_load((Path(__file__).parents[3] / ".github/workflows/run-ci-file.yml").read_text())
+    command = workflow["jobs"]["run-cuda-file"]["with"]["execute_command"]
+    test_file = Path(
+        _write_test_file(
+            tmp_path,
+            'register_ci_gate(metric_key="rollout/raw_reward", steps="last", '
+            'constraint={"rel_up": 0.20, "rel_down": 0.20})',
+        )
+    )
+    test_file.write_text(test_file.read_text().replace('labels=["megatron"]', f'labels=["long"], nightly={nightly}'))
+    other = Path(_write_test_file(tmp_path, "", name="test_not_requested.py"))
+    monkeypatch.chdir(tmp_path)
+    registry = _registry(test_file.name)
+    _seed_history(store, registry, baseline_n)
+    command = command.replace("${{ inputs.test_file }}", test_file.name)
+    command = command.replace("${{ needs.resolve-file-run.outputs.suite }}", registry.suite)
+    command = command.replace("${{ needs.resolve-file-run.outputs.timeout_seconds }}", "2700")
+    argv = shlex.split(command)
+    monkeypatch.setattr(sys, "argv", argv[argv.index("python3") + 1 :])
+    monkeypatch.setattr(run_suite, "discover_ci_files", lambda: [test_file.name, other.name])
+    monkeypatch.setattr(run_suite, "build_store_from_env", lambda: store)
+    monkeypatch.setattr(run_suite, "reaping_is_isolated", lambda: False)
+    monkeypatch.setattr(run_suite.tempfile, "mkdtemp", lambda **kwargs: str(tmp_path / "records"))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    attempted = []
+
+    def run_child(func, args, kwargs, timeout):
+        attempted.append(args[0])
+        assert timeout == 2700
+        record_dir = Path(kwargs["record_dir"])
+        record_dir.mkdir(parents=True, exist_ok=True)
+        metrics = {"rollout/raw_reward": [[0, current]]} if current is not None else {}
+        _write_record(record_dir, metrics, name="child.jsonl")
+        return 0
+
+    monkeypatch.setattr(ci_utils, "run_with_timeout", run_child)
+    with caplog.at_level("INFO"), pytest.raises(SystemExit) as result:
+        run_suite.main()
+    assert (result.value.code == 0) is allowed
+    assert attempted == [test_file.name]
+    assert _count_runs(store) == baseline_n
+    assert f"[CI Gate][enforce] {test_file.name}: {'PASS' if allowed else 'FAIL'}" in caplog.text

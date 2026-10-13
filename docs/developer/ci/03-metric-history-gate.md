@@ -225,6 +225,8 @@ Every `register_ci_gate(...)` declaration defaults to `enforce=True`; tests and 
 - The harness reports the verdict and metric details before writing a baseline. Nightly/weekly retain the original trusted/untrusted verdict, including numerical regressions that fail enforcement. Ordinary PR and release runs only read history. Gate failures affect suite exit status, honor fail-fast/continue policy, and do not retry successful child processes. Invalid declarations fail CI.
 - Without `NEON_DATABASE_URL`, local and secretless runs explicitly skip the history gate; they do not provide enforcement evidence. CPU and ROCm behavior is unchanged.
 
+CUDA [`/rerun-test`](01-label.md#manage-ci-from-pr-comments) runs use the same harness and gate, with baseline writes disabled. The default-branch command workflow must include that wiring; a PR-only workflow edit does not change the dispatched command.
+
 The gate controls executed CI job results. Test selection and repository required-status-check settings separately determine which jobs run and whether their failure blocks merging.
 
 ## Replay golden history
