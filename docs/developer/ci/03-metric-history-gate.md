@@ -262,6 +262,7 @@ All stored executing suites are kept separate. The replay checks consistency of 
 - A test-file edit does not reset the series: `test_file_hash` was dropped from the run-series identity because a tiny edit to a test kept wiping its whole history. A test change that genuinely shifts a metric's expected level surfaces as gate failures instead; the reset levers are manual — `mark_untrusted` the stale runs, or edit the declaration literals (new `steps_key` / `constraint_key` ⇒ fresh coordinate).
 - Baseline writing is selected by the resolved CI policy rather than inferred from `GITHUB_EVENT_NAME`; nightly and weekly write, while regular and release runs only read history. Enforcement follows each declaration in either mode.
 - One test attempt yields one merged record: a file that launches training more than once concatenates the runs' series, so a step repeats and a `steps="all"` selection is an ERROR. Such a file declares no gate unless each run logs distinct metric keys, as the session TITO tests do.
+- A step value that is exactly zero in some runs and not in others has no stable band. Small-batch GRPO tests log `train/grad_norm` as 0 whenever every group's rewards are uniform, so their `train/grad_norm` declarations set `enforce=False`; the check still decides baseline trust.
 - Open: should a brand-new test's first baselines need human confirmation before counting as trusted? (v1: no.)
 
 
