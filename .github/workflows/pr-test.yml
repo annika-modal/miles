@@ -297,7 +297,9 @@ jobs:
       timeout_minutes: 30
       container_image: radixark/miles:dev
       ref: ${{ inputs.ref || '' }}
-      execute_command: python3 tests/fast-gpu/test_mooncake_p2p_transport.py
+      # One file, like /rerun-test: the plan job only understands run_suite.py commands.
+      plan_already_resolved: true
+      execute_command: timeout --signal=TERM --kill-after=30s 900s python3 tests/fast-gpu/test_mooncake_p2p_transport.py
     secrets: inherit
 
   stage-c-2-gpu-h200:
