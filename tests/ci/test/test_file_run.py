@@ -239,8 +239,13 @@ def test_target_workflow_keeps_orchestration_trusted_and_checks_out_exact_head()
     assert "python3 tests/ci/run_suite.py --hw cuda" in workflow
     assert "pytest '${{ inputs.test_file }}' -v -x" in workflow
     assert "--test-file '${{ inputs.test_file }}'" in workflow
-    assert workflow.count("timeout --signal=TERM --kill-after=30s") == 2
-    assert workflow.count("'${{ needs.resolve-file-run.outputs.timeout_seconds }}s'") == 2
+    # CPU wraps pytest in the file timeout; CUDA hands it to run_suite, whose
+    # per-file timer covers only the test, as in stage runs.
+    cuda_job = workflow.split("  run-cuda-file:", 1)[1].split("  run-cpu-file:", 1)[0]
+    assert "timeout --signal" not in cuda_job
+    assert "--timeout-per-file '${{ needs.resolve-file-run.outputs.timeout_seconds }}'" in cuda_job
+    assert workflow.count("timeout --signal=TERM --kill-after=30s") == 1
+    assert workflow.count("'${{ needs.resolve-file-run.outputs.timeout_seconds }}s'") == 1
     for reusable in (gpu_workflow, cpu_workflow):
         assert "plan_already_resolved:" in reusable
         assert "if: ${{ !inputs.plan_already_resolved }}" in reusable
