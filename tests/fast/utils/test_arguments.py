@@ -29,6 +29,7 @@ from miles.utils.arguments import (
     miles_validate_args,
     resolve_rollout_function_paths,
     validate_async_off_policy_correction,
+    validate_log_probs_backend_args,
     validate_skip_actor_forward_only,
 )
 from miles.utils.env_report.redaction import _SECRET_ARG_NAMES, _SECRET_ENV_VAR_PATTERN
@@ -481,6 +482,7 @@ def _fully_async_candidate_args(**overrides) -> SimpleNamespace:
         recompute_logprobs_via_prefill=False,
         rollout_all_samples_process_path=None,
         eval_num_gpus=0,
+        over_sampling_batch_size=None,
     )
     return SimpleNamespace(**(defaults | overrides))
 
@@ -545,6 +547,7 @@ def test_fully_async_rejects_abort_pause_mode():
         recompute_logprobs_via_prefill=False,
         rollout_all_samples_process_path=None,
         eval_num_gpus=0,
+        over_sampling_batch_size=None,
     )
 
     with pytest.raises(AssertionError, match="pause-generation-mode abort"):
@@ -859,6 +862,26 @@ def test_sampling_support_arguments_fail_closed(extra, message):
 
     with pytest.raises(ValueError, match=message):
         miles_validate_args(args)
+
+
+@pytest.mark.parametrize(
+    ("extra", "vocab_size", "message"),
+    [
+        (["--true-on-policy-mode"], 151_936, "does not support --true-on-policy-mode"),
+        (["--rollout-top-k", "32"], 151_936, "does not support sampling-support replay"),
+        ([], None, "needs --vocab-size"),
+    ],
+    ids=["true_on_policy", "sampling_support_replay", "no_vocab_size"],
+)
+def test_fused_log_probs_backend_rejects_what_it_does_not_cover(extra, vocab_size, message):
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args(["--log-probs-backend", "fused", "--num-rollout", "1"] + extra + REQUIRED_ARGS)
+    args.vocab_size = vocab_size  # a Megatron flag, absent from this parser
+    args.use_sampling_support_replay = "--rollout-top-k" in extra  # derived by miles_validate_args
+
+    with pytest.raises(ValueError, match=message):
+        validate_log_probs_backend_args(args)
 
 
 @pytest.mark.parametrize(
@@ -2079,6 +2102,27 @@ def test_bridge_mode_accepts_critic(tmp_path):
     assert args.use_critic is True
 
 
+def test_p2p_accepts_megatron_bridge(tmp_path):
+    """Bridge gathers PP and p2p assigns senders over the gathered placement, so each rollout engine rank is written once."""
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args(
+        [
+            "--update-weight-transfer-mode",
+            "p2p",
+            "--megatron-to-hf-mode",
+            "bridge",
+            "--hf-checkpoint",
+            str(tmp_path),
+            "--num-rollout",
+            "1",
+        ]
+        + REQUIRED_ARGS
+    )
+
+    miles_validate_args(args)
+
+
 def test_critic_is_accepted_on_the_only_trainer(tmp_path):
     """Shared actor/critic PPO used to be rejected on the cell based trainer, which is now the only one."""
     parser = argparse.ArgumentParser()
@@ -2998,3 +3042,22 @@ class TestWeightTransferModeSelection:
         args = self._parse(["--custom-config-path", str(config), *extra])
         with pytest.raises(ValueError, match=error):
             miles_validate_args(args)
+
+
+def test_fully_async_warns_that_over_sampling_batch_size_is_ignored(caplog):
+    """Fully-async never reads --over-sampling-batch-size; passing it silently does nothing."""
+    args = _fully_async_candidate_args(fully_async=True, over_sampling_batch_size=32)
+
+    with caplog.at_level(logging.WARNING, logger="miles.utils.arguments"):
+        _resolve_rollout_functions(args)
+
+    assert "--over-sampling-batch-size has no effect under --fully-async" in caplog.text
+
+
+def test_fully_async_without_over_sampling_batch_size_does_not_warn(caplog):
+    args = _fully_async_candidate_args(fully_async=True)
+
+    with caplog.at_level(logging.WARNING, logger="miles.utils.arguments"):
+        _resolve_rollout_functions(args)
+
+    assert "over-sampling-batch-size" not in caplog.text

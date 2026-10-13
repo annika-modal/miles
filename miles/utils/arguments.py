@@ -102,6 +102,13 @@ def _resolve_rollout_functions(args) -> None:
         assert (
             args.rollout_all_samples_process_path is None
         ), "--fully-async does not support --rollout-all-samples-process-path"
+        if args.over_sampling_batch_size is not None:
+            # Runs before the default fills it in, so non-None means the user passed it.
+            logger.warning(
+                "--over-sampling-batch-size has no effect under --fully-async: groups are submitted "
+                "continuously and each step drains --rollout-batch-size of them. "
+                "Use --async-max-concurrent-samples to control how many samples are in flight."
+            )
 
     user_eval_path = args.eval_function_path
     args.rollout_function_path, args.eval_function_path = resolve_rollout_function_paths(args)
@@ -570,6 +577,23 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
             )
             parser.add_argument(
+                "--log-probs-backend",
+                type=str,
+                choices=["torch", "fused"],
+                default="torch",
+                help=(
+                    "How per-token log-probs and entropy are computed from the logits. 'torch' upcasts each "
+                    "response chunk to fp32 and keeps its softmax for backward. 'fused' streams the logits "
+                    "through Triton kernels and writes the gradient in place; --log-probs-chunk-size does "
+                    "not apply to it. Not only an implementation choice: 'fused' normalizes over the true "
+                    "vocabulary (--vocab-size), as the rollout engine does, while 'torch' normalizes over "
+                    "Megatron's padded vocabulary (except for --loss-type score_centering), so with vocab "
+                    "padding (TP > 1) the two give slightly different log-probs, ratios and KL. "
+                    "'fused' does not support --true-on-policy-mode or sampling-support replay "
+                    "(--rollout-top-p below 1 or a positive --rollout-top-k)."
+                ),
+            )
+            parser.add_argument(
                 "--indep-dp",
                 action="store_true",
                 default=False,
@@ -958,7 +982,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=512 * 1024**2,
                 help=(
                     "buffer size for update weight, in bytes. "
-                    "This is used for updating weights by batch and should be useful for MoE models."
+                    "This is used for updating weights by batch and should be useful for MoE models. "
+                    "P2P mode also sizes each of its two transfer buffers with it (or the largest parameter, if larger)."
                 ),
             )
             parser.add_argument(
@@ -1113,16 +1138,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
-                "--p2p-transfer-num-workers",
-                type=int,
-                default=4,
-                help="Number of thread pool workers for P2P weight transfer.",
-            )
-            parser.add_argument(
                 "--p2p-transfer-timeout",
                 type=float,
                 default=30.0,
-                help="Timeout in seconds for each P2P transfer operation.",
+                help=(
+                    "Seconds the end of a P2P weight update waits for writes still in flight; a write not done by "
+                    "then fails the update."
+                ),
             )
             return parser
 
@@ -3211,6 +3233,29 @@ def _resolve_run_uuid(args: argparse.Namespace) -> str:
     return generate_run_uuid()
 
 
+def validate_log_probs_backend_args(args) -> None:
+    """Reject settings the fused log-prob op does not cover, at startup rather than mid-run."""
+    if args.log_probs_backend != "fused":
+        return
+    if args.true_on_policy_mode:
+        raise ValueError(
+            "--log-probs-backend fused does not support --true-on-policy-mode, which needs bitwise "
+            "parity with the rollout engine's own log-softmax; use --log-probs-backend torch."
+        )
+    if args.use_sampling_support_replay:
+        raise ValueError(
+            "--log-probs-backend fused does not support sampling-support replay "
+            f"(--rollout-top-p {args.rollout_top_p}, --rollout-top-k {args.rollout_top_k}); "
+            "use --log-probs-backend torch."
+        )
+    # unset, the actor falls back to the tokenizer's vocab_size, which can leave out added special tokens
+    if args.train_backend == "megatron" and args.vocab_size is None:
+        raise ValueError(
+            "--log-probs-backend fused needs --vocab-size (the HF config's vocab_size) on the megatron "
+            "backend, to exclude Megatron's vocabulary padding from the softmax."
+        )
+
+
 def miles_validate_args(args):
     if args.custom_config_path:
         data = yaml.safe_load(resolve_file_arg(args.custom_config_path)) or {}
@@ -3321,6 +3366,8 @@ def miles_validate_args(args):
                 "those objectives require a separate full-policy actor score"
             )
     validate_rollout_topk_logprobs_args(args)
+
+    validate_log_probs_backend_args(args)
 
     if not args.use_session_server and args.tito_model != TITOTokenizerType.DEFAULT.value:
         raise ValueError(
@@ -3606,9 +3653,6 @@ def miles_validate_args(args):
             getattr(args, "prefill_num_servers", None) is None
         ), "P2P weight transfer mode has not been tested when PD is enabled."
         assert args.lora_rank <= 0, "LoRA weight sync is not supported for p2p (RDMA) weight transfer."
-        assert (
-            args.megatron_to_hf_mode != "bridge"
-        ), f"{args.update_weight_transfer_mode} mode is not supported when use megatron-bridge"
 
     if args.update_weight_transfer_mode == "disk-delta":
         assert not args.colocate, (
