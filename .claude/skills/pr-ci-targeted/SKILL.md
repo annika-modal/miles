@@ -26,32 +26,49 @@ PYTHONPATH=. python3 .claude/skills/pr-ci-targeted/affected_tests.py --base orig
 It prints:
 - every registered test the diff reaches, with backend, suite, labels, hardware,
   `est_time`, disabled reason, and the changed file it was reached from;
-- one ready-to-post `/rerun-test <file>` line per enabled CUDA test;
+- one ready-to-post `/rerun-test <file>` line per enabled CUDA test and per
+  labeled CPU test;
 - the domain labels of those tests, as "reached / all tests with that label";
-- hubs: files referenced by too many others to trace, such as shared
-  arguments or command utils. A changed hub means the change is broad, unless
-  the diff there only adds something new (a flag read by the files already
-  listed); judge it by what changed.
-- changed non-Python, non-doc paths that no source or test refers to (Docker,
-  workflow, config files): these need label-based CI.
+- hubs: files whose dependents reach more than `--hub-limit` (40) enabled CUDA
+  tests, such as shared arguments or launcher utils. They are not followed. A
+  changed hub means the change is broad, unless the diff there only adds
+  something new (a flag read by the files already listed); judge it by what
+  changed.
+- changed non-Python paths outside the no-GPU allowlist of
+  `tests/ci/stage_selection.py` (Docker, workflow, config files): these affect
+  GPU runtime outside the import trace and need label-based CI, even when a CPU
+  test mentions them.
+- changed files that `train.py`, `train_async.py`, `train_multi_policy.py` or
+  `serve_tinker.py` load: every e2e training run executes them, but e2e tests
+  start those entry points through the launcher hub, so the trace cannot list
+  them. Add the domain labels of the training paths the change touches.
+- changed Python files nothing imports or names: entry points, or code loaded
+  some other way.
 
-The trace is a text search through dotted imports, re-exporting packages, and
-model definitions under `scripts/models/` (referenced by `--model-name`). Read
+The trace builds the import graph with `ast`: absolute, relative and
+`from pkg import module` imports, bare imports of a sibling file put on
+`sys.path`, and dotted module paths or file paths inside string literals
+(`--custom-loss-function-path`, `python tools/x.py` subprocesses). A model
+definition under `scripts/models/` is matched by its name in string literals
+(`--model-name`), including variants built from it (`-5layer`, `_lora`). Read
 the list before acting.
-- **Drop false positives**: a test that only mentions a module in a comment, or
-  a long multi-policy run reached through a shared launcher helper.
-- **Add misses**: other dynamic imports, or a test whose model uses the changed
-  kernel through a path the trace did not follow. Grep the tests for the model
-  or op name.
+- **Drop false positives**: a test that only names a path in an error message,
+  or a long multi-policy run reached through a shared launcher helper.
+- **Add misses**: other dynamic loading (`importlib` with a computed name,
+  plugin registries), or a test whose model uses the changed kernel through a
+  path the trace did not follow. Grep the tests for the model or op name.
 
-CPU tests (`stage-a-cpu`, `stage-b-cpu`) always run on the PR; they need no
-action.
+CPU tests without labels (`stage-a-cpu`, `stage-b-cpu`) run on every PR; they
+need no action. A labeled CPU registration (`register_cpu_ci(labels=[...])`,
+e.g. `rollout`, `k8s`, `agentic`) is gated on `run-ci-<label>` like a GPU test,
+so it is listed with the `/rerun-test` lines.
 
 ## 2. Choose files or labels
 
 - **A few GPU files (roughly ≤ 10), no changed hub** → `/rerun-test`, one
   comment per file. This is the default.
-- **Many files from one domain, or a changed hub** (arguments, launcher utils,
+- **Many files from one domain, a changed hub, a changed file on the training
+  entry path, or a path outside the import trace** (arguments, launcher utils,
   Docker or workflow files) → the smallest set of domain labels that covers
   them. Prefer a label whose "reached / all" ratio is high. Add `run-on-blackwell`
   only when Blackwell-specific code changed.

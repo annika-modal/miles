@@ -2,117 +2,184 @@
 
 Run from the repo root: PYTHONPATH=. python3 .claude/skills/pr-ci-targeted/affected_tests.py [--base origin/main]
 
-A changed Python module is referenced by its dotted path (and by the package path when the package
-__init__ re-exports it), a model definition under scripts/models/ by its name as a string literal (launchers
-load it by --model-name), and any other file by its path. References are followed through source files up to
---depth hops, and every registered test file found along the way is reported. Files referenced by more than
---hub-limit files (arguments, command utils) are reported as hubs and not followed: a change there needs
-domain labels, not a file list. It is a text search, so it can over-report and it misses other dynamic
-imports; read the list.
+Python dependencies come from the import graph: absolute, relative and `from pkg import module` imports, bare
+imports of a sibling file put on sys.path, and dotted module paths or file paths inside string literals
+(--custom-loss-function-path, `python tools/x.py` subprocesses). A model definition under scripts/models/ is
+referenced by its name in a string literal (launchers load it by --model-name), and any other changed file by
+its path. Dependents are followed up to --depth hops, and every registered test found is reported. A file whose
+dependents reach more than --hub-limit GPU tests (arguments, launcher utils) is a hub and is not followed: a
+change there needs domain labels, not a file list. Other dynamic loading is not seen; read the list.
 """
 
 import argparse
+import ast
+import functools
 import re
 import subprocess
+import warnings
 from collections import Counter
 from pathlib import Path
 
 from tests.ci.ci_register import HWBackend, collect_tests, discover_ci_files
+from tests.ci.stage_selection import _known_no_gpu_path
 
 SOURCE_ROOTS = ("miles", "miles_plugins", "scripts", "examples", "tests")
+ENTRY_POINTS = ("train.py", "train_async.py", "train_multi_policy.py", "serve_tinker.py")
+DOTTED_NAME = re.compile(r"(?<![\w./-])[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+")
 
 
 def changed_files(base: str) -> list[str]:
+    """Every path the branch touches; a rename or deletion keeps its old path so its importers are traced."""
     out = subprocess.run(
-        ["git", "diff", "--name-only", "--diff-filter=d", f"{base}...HEAD"], check=True, capture_output=True, text=True
+        ["git", "diff", "--name-only", "--no-renames", f"{base}...HEAD"], check=True, capture_output=True, text=True
     ).stdout
     return [line for line in out.splitlines() if line]
-
-
-def module_tokens(path: str) -> list[str]:
-    """Dotted names under which other files import `path`, most specific first."""
-    if not path.endswith(".py"):
-        return [path]
-    if path.startswith("scripts/models/"):
-        return [path, f'"{Path(path).stem}"']
-    parts = Path(path).with_suffix("").parts
-    if parts[-1] == "__init__":
-        parts = parts[:-1]
-    tokens = [".".join(parts)]
-    while len(parts) > 1:
-        package_init = Path(*parts[:-1], "__init__.py")
-        if not package_init.exists() or not re.search(rf"\b{re.escape(parts[-1])}\b", package_init.read_text()):
-            break
-        parts = parts[:-1]
-        tokens.append(".".join(parts))
-    return tokens + [path]
-
-
-def reference_pattern(tokens: list[str]) -> re.Pattern:
-    return re.compile(
-        "|".join(
-            (
-                rf"{re.escape(token[:-1])}(?=[\"_{{-])"
-                if token.startswith('"')
-                else rf"(?<![\w.]){re.escape(token)}(?![\w])"
-            )
-            for token in tokens
-        )
-    )
 
 
 def python_files(roots: tuple[str, ...]) -> list[str]:
     return sorted(str(p) for root in roots if Path(root).exists() for p in Path(root).rglob("*.py") if p.is_file())
 
 
+def module_name(path: str) -> str:
+    parts = Path(path).with_suffix("").parts
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def parse(path: str) -> ast.Module | None:
+    try:
+        return ast.parse(Path(path).read_text(), filename=path)
+    except (SyntaxError, UnicodeDecodeError):
+        return None
+
+
+def imported_files(path: str, tree: ast.Module, modules: dict[str, str], paths: set[str]) -> set[str]:
+    """Files `path` imports, or names as a dotted module path in a string literal."""
+    package = module_name(path) if path.endswith("__init__.py") else module_name(path).rpartition(".")[0]
+
+    def resolve(name: str) -> set[str]:
+        parts = name.split(".")
+        found = {modules[m] for m in (".".join(parts[: i + 1]) for i in range(len(parts))) if m in modules}
+        sibling = str(Path(path).parent / f"{parts[0]}.py")
+        if not found and sibling in paths:
+            found.add(sibling)
+        return found
+
+    targets: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                targets |= resolve(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                anchor = package.split(".")[: len(package.split(".")) - (node.level - 1)]
+                base = ".".join(anchor + ([base] if base else []))
+            if base:
+                targets |= resolve(base)
+            for alias in node.names:
+                if f"{base}.{alias.name}" in modules:
+                    targets.add(modules[f"{base}.{alias.name}"])
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "." in node.value:
+            for name in DOTTED_NAME.findall(node.value):
+                if name.split(".")[0] in SOURCE_ROOTS:
+                    targets |= resolve(name)
+    targets.discard(path)
+    return targets
+
+
+def model_name_pattern(stem: str) -> re.Pattern:
+    """A model name used whole or as the base of a variant (`-5layer`, `_lora`), not as a longer name's prefix."""
+    return re.compile(rf"(?<![\w.-]){re.escape(stem)}(?![\w.])")
+
+
+def string_literals(tree: ast.Module) -> list[str]:
+    return [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+
+
+def source_graph(changed: list[str]) -> tuple[dict[str, set[str]], dict[str, str], dict[str, list[str]]]:
+    """Each source file's imported files, text and string literals; deleted modules stay importable by name."""
+    files = python_files(SOURCE_ROOTS) + [path for path in ENTRY_POINTS if Path(path).exists()]
+    modules = {module_name(path): path for path in files + [p for p in changed if p.endswith(".py")]}
+    paths = set(modules.values())
+    trees = {path: tree for path in files if (tree := parse(path)) is not None}
+    imports = {path: imported_files(path, tree, modules, paths) for path, tree in trees.items()}
+    texts = {path: Path(path).read_text() for path in trees}
+    literals = {path: string_literals(tree) for path, tree in trees.items()}
+    return imports, texts, literals
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--base", default="origin/main")
-    parser.add_argument("--depth", type=int, default=3, help="source-to-source hops to follow")
-    parser.add_argument("--hub-limit", type=int, default=25, help="max referencing files before a file is a hub")
+    parser.add_argument("--depth", type=int, default=3, help="importer hops to follow")
+    parser.add_argument(
+        "--hub-limit", type=int, default=40, help="a file reaching more enabled CUDA tests than this is a hub"
+    )
     args = parser.parse_args()
+    warnings.filterwarnings("ignore", category=SyntaxWarning)
 
     changed = changed_files(args.base)
-    registered = set(discover_ci_files())
-    sources = {path: Path(path).read_text() for path in python_files(SOURCE_ROOTS) if path not in registered}
-    tests = {path: Path(path).read_text() for path in registered}
+    registrations = {path: collect_tests([path]) for path in discover_ci_files()}
+    gpu_tests = {
+        path for path, rs in registrations.items() if any(r.backend == HWBackend.CUDA and not r.disabled for r in rs)
+    }
+    imports, texts, literals = source_graph(changed)
+    importers: dict[str, set[str]] = {}
+    for path, targets in imports.items():
+        for target in targets:
+            importers.setdefault(target, set()).add(path)
+    run_by_training, frontier = set(), [path for path in ENTRY_POINTS if path in imports]
+    while frontier:
+        path = frontier.pop()
+        if path not in run_by_training:
+            run_by_training.add(path)
+            frontier.extend(imports.get(path, ()))
 
-    reached: dict[str, str] = {path: "changed" for path in changed if path in registered}
-    frontier = [path for path in changed if path not in registered and (path.endswith(".py") or "/" in path)]
+    @functools.cache
+    def referrers(path: str) -> frozenset[str]:
+        if not path.endswith(".py"):
+            return frozenset(other for other, text in texts.items() if path in text)
+        refs = importers.get(path, set()) | {
+            other for other, values in literals.items() if any(path in v for v in values)
+        }
+        if path.startswith("scripts/models/"):
+            pattern = model_name_pattern(Path(path).stem)
+            refs |= {other for other, values in literals.items() if any(pattern.search(v) for v in values)}
+        return frozenset(refs - {path})
+
+    @functools.cache
+    def gpu_reach(path: str) -> int:
+        """Enabled CUDA tests within --depth hops of `path`: how broad a change to it is."""
+        found, frontier, seen = set(), {path}, {path}
+        for _ in range(args.depth + 1):
+            frontier = {ref for node in frontier for ref in referrers(node)} - seen
+            seen |= frontier
+            found |= frontier & gpu_tests
+            frontier -= set(registrations)
+        return len(found)
+
+    reached: dict[str, str] = {path: "changed" for path in changed if path in registrations}
+    frontier = [path for path in changed if path not in registrations and not _known_no_gpu_path(path)]
     seen = set(frontier)
     hubs: dict[str, int] = {}
-    unmatched = {
-        path for path in frontier if not path.endswith((".py", ".md", ".mdx")) and not path.startswith("docs/")
-    }
+    unreferenced = []
     for hop in range(args.depth + 1):
         next_frontier = []
         for path in frontier:
-            pattern = reference_pattern(module_tokens(path))
-            test_refs = [test for test, text in tests.items() if pattern.search(text)]
-            source_refs = [source for source, text in sources.items() if source != path and pattern.search(text)]
-            if test_refs or source_refs:
-                unmatched.discard(path)
-            if len(test_refs) + len(source_refs) > args.hub_limit:
-                hubs[path] = len(test_refs) + len(source_refs)
+            if hop == 0 and path.endswith(".py") and not referrers(path):
+                unreferenced.append(path)
+            if gpu_reach(path) > args.hub_limit:
+                hubs[path] = gpu_reach(path)
                 continue
-            for test in test_refs:
-                reached.setdefault(test, f"{path} (hop {hop})")
-            if hop == args.depth:
-                continue
-            for source in source_refs:
-                if source not in seen:
-                    seen.add(source)
-                    next_frontier.append(source)
+            for ref in sorted(referrers(path)):
+                if ref in registrations:
+                    reached.setdefault(ref, f"{path} (hop {hop})")
+                elif hop < args.depth and ref not in seen:
+                    seen.add(ref)
+                    next_frontier.append(ref)
         frontier = next_frontier
 
-    untraced = sorted(
-        unmatched | {path for path in changed if "/" not in path and not path.endswith((".py", ".md", ".mdx"))}
-    )
-    rows = []
-    for test in sorted(reached):
-        for registry in collect_tests([test]):
-            rows.append((test, registry))
-
+    rows = [(test, registry) for test in sorted(reached) for registry in registrations[test]]
     print(f"{len(changed)} changed files vs {args.base}; {len(rows)} registered tests reached\n")
     print("| test | backend | suite | labels | hardware | est_time | disabled | reached via |")
     print("|---|---|---|---|---|---|---|---|")
@@ -122,29 +189,50 @@ def main() -> None:
             f"| {r.est_time:.0f} | {r.disabled or ''} | {reached[test]} |"
         )
 
-    gpu = [(test, r) for test, r in rows if r.backend == HWBackend.CUDA and not r.disabled]
-    print(f"\n/rerun-test comments for the {len(gpu)} enabled CUDA tests (post each as its own comment):")
-    for test, _ in gpu:
+    gated = [
+        (test, r)
+        for test, r in rows
+        if not r.disabled and (r.backend == HWBackend.CUDA or (r.backend == HWBackend.CPU and r.labels))
+    ]
+    print(f"\n/rerun-test comments for the {len(gated)} enabled CUDA and labeled CPU tests (one comment each):")
+    for test, _ in gated:
         print(f"/rerun-test {test}")
 
     label_cost = Counter(
         label
-        for path in registered
-        for r in collect_tests([path])
-        if r.backend == HWBackend.CUDA and not r.disabled
+        for rs in registrations.values()
+        for r in rs
+        if r.backend in (HWBackend.CUDA, HWBackend.CPU) and not r.disabled
         for label in r.labels
     )
-    needed = Counter(label for _, r in gpu for label in r.labels)
-    print("\nDomain labels of those tests (reached / all enabled CUDA tests carrying the label):")
+    needed = Counter(label for _, r in gated for label in r.labels)
+    print("\nDomain labels of those tests (reached / all enabled tests carrying the label):")
     for label, count in needed.most_common():
         print(f"  run-ci-{label}: {count} / {label_cost[label]}")
     if hubs:
-        print("\nHubs not followed (referenced by many files; a changed hub needs domain labels):")
+        print(f"\nHubs not followed (each reaches more than {args.hub_limit} GPU tests; needs domain labels):")
         for path, count in sorted(hubs.items(), key=lambda item: -item[1]):
-            print(f"  {path}: {count} referencing files{' (changed)' if path in changed else ''}")
-    if untraced:
-        print("\nChanged non-Python paths no source or test refers to (they may need broader CI):")
-        for path in untraced:
+            print(f"  {path}: reaches {count} GPU tests{' (changed)' if path in changed else ''}")
+    outside_trace = sorted(
+        path
+        for path in changed
+        if not path.endswith(".py") and path not in registrations and not _known_no_gpu_path(path)
+    )
+    if outside_trace:
+        print("\nChanged paths that affect GPU runtime outside the import trace (need label-based CI):")
+        for path in outside_trace:
+            print(f"  {path}")
+    on_training_path = sorted(set(changed) & run_by_training)
+    if on_training_path:
+        print(
+            "\nChanged files the training entry points load (every e2e training run executes them; the import trace"
+            " stops at the launcher hub, so add the domain labels of the training paths they change):"
+        )
+        for path in on_training_path:
+            print(f"  {path}")
+    if unreferenced:
+        print("\nChanged Python files nothing imports or names (entry points, or loaded some other way; check):")
+        for path in sorted(unreferenced):
             print(f"  {path}")
 
 
