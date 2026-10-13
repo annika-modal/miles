@@ -21,7 +21,7 @@ from collections import Counter
 from pathlib import Path
 
 from tests.ci.ci_register import HWBackend, collect_tests, discover_ci_files
-from tests.ci.stage_selection import _known_no_gpu_path
+from tests.ci.stage_selection import known_no_gpu_path
 
 SOURCE_ROOTS = ("miles", "miles_plugins", "scripts", "examples", "tests")
 ENTRY_POINTS = ("train.py", "train_async.py", "train_multi_policy.py", "serve_tinker.py")
@@ -159,7 +159,7 @@ def main() -> None:
         return len(found)
 
     reached: dict[str, str] = {path: "changed" for path in changed if path in registrations}
-    frontier = [path for path in changed if path not in registrations and not _known_no_gpu_path(path)]
+    frontier = [path for path in changed if path not in registrations and not known_no_gpu_path(path)]
     seen = set(frontier)
     hubs: dict[str, int] = {}
     unreferenced = []
@@ -216,7 +216,7 @@ def main() -> None:
     outside_trace = sorted(
         path
         for path in changed
-        if not path.endswith(".py") and path not in registrations and not _known_no_gpu_path(path)
+        if not path.endswith(".py") and path not in registrations and not known_no_gpu_path(path)
     )
     if outside_trace:
         print("\nChanged paths that affect GPU runtime outside the import trace (need label-based CI):")
