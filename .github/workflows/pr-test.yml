@@ -283,8 +283,10 @@ jobs:
 
   stage-c-4-gpu-h200:
     # DNM (R1): the Mooncake probe once per runner, only on runners carrying the `aliyun` label.
-    needs: [resolve-ci-policy, resolve-ci-image]
-    if: always() && !cancelled() && needs.resolve-ci-policy.result == 'success' && needs.resolve-ci-image.result == 'success'
+    # The probe changes no image, so the dev image is what resolve-ci-image would pick; depending on
+    # it would tie the probe to docker-build, which this DNM's stage-a-cpu lock-test failure skips.
+    needs: [resolve-ci-policy]
+    if: always() && !cancelled() && needs.resolve-ci-policy.result == 'success'
     strategy:
       fail-fast: false
       matrix:
@@ -293,7 +295,7 @@ jobs:
     with:
       runs_on: ${{ format('["{0}", "aliyun"]', matrix.runner) }}
       timeout_minutes: 30
-      container_image: ${{ needs.resolve-ci-image.outputs.container_image }}
+      container_image: radixark/miles:dev
       ref: ${{ inputs.ref || '' }}
       execute_command: python3 tests/fast-gpu/test_mooncake_p2p_transport.py
     secrets: inherit
