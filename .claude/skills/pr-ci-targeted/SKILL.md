@@ -48,15 +48,20 @@ It prints:
 The trace builds the import graph with `ast`: absolute, relative and
 `from pkg import module` imports, bare imports of a sibling file put on
 `sys.path`, and dotted module paths or file paths inside string literals
-(`--custom-loss-function-path`, `python tools/x.py` subprocesses). A model
-definition under `scripts/models/` is matched by its name in string literals
-(`--model-name`), including variants built from it (`-5layer`, `_lora`). Read
-the list before acting.
+(`--custom-loss-function-path`, `python tools/x.py` subprocesses). A changed
+`conftest.py` reaches every registered test under its directory, since pytest
+loads it without an import. A model definition under `scripts/models/` is
+matched by its name in string literals (`--model-name`), including variants
+built from it (`-5layer`, `_lora`). Read the list before acting.
 - **Drop false positives**: a test that only names a path in an error message,
   or a long multi-policy run reached through a shared launcher helper.
 - **Add misses**: other dynamic loading (`importlib` with a computed name,
   plugin registries), or a test whose model uses the changed kernel through a
   path the trace did not follow. Grep the tests for the model or op name.
+- **Check importers outside this repo**: the Megatron fork and sglang-miles
+  import some `miles.*` modules by path (for example `miles.utils.replay_base`),
+  and the trace only sees this repo. A changed module the fork imports needs the
+  e2e tests of the models that use it, even when the script reports nothing.
 
 CPU tests without labels (`stage-a-cpu`, `stage-b-cpu`) run on every PR; they
 need no action. A labeled CPU registration (`register_cpu_ci(labels=[...])`,
@@ -115,9 +120,9 @@ For each ❌:
 3. If the PR caused it: fix it, reproduce locally or on a devbox when you can,
    and push. Follow the repo's push policy (append commits; force-push only
    where the PR allows it).
-4. Post one short note on the PR (what failed, why, and the fix commit),
-   followed by `/rerun-test <file>` for that file only. Files that already
-   passed and are untouched by the fix need no re-run.
+4. Report what failed, why, and the fix commit to the user; post it on the PR
+   only when the user asks. Then comment `/rerun-test <file>` for that file
+   only. Files that already passed and are untouched by the fix need no re-run.
 5. If it is infra or a flake: re-run the file once. If it fails the same way,
    report it as the triage rule says.
 
@@ -139,3 +144,9 @@ Tell the user:
 - which files were run, and each one's result and elapsed time;
 - what failed, why, and which commit fixed it;
 - what was deliberately not run, and why.
+
+## Maintaining the script
+
+The tracer's behavior is pinned by `tests/ci/test/test_affected_tests.py`
+(stage-a CPU), which runs it on small synthetic trees. Extend it with any new
+import form or rule.

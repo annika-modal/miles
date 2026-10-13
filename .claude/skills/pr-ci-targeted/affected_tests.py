@@ -5,10 +5,11 @@ Run from the repo root: PYTHONPATH=. python3 .claude/skills/pr-ci-targeted/affec
 Python dependencies come from the import graph: absolute, relative and `from pkg import module` imports, bare
 imports of a sibling file put on sys.path, and dotted module paths or file paths inside string literals
 (--custom-loss-function-path, `python tools/x.py` subprocesses). A model definition under scripts/models/ is
-referenced by its name in a string literal (launchers load it by --model-name), and any other changed file by
-its path. Dependents are followed up to --depth hops, and every registered test found is reported. A file whose
-dependents reach more than --hub-limit GPU tests (arguments, launcher utils) is a hub and is not followed: a
-change there needs domain labels, not a file list. Other dynamic loading is not seen; read the list.
+referenced by its name in a string literal (launchers load it by --model-name), a conftest.py by every test under
+its directory, and any other changed file by its path. Dependents are followed up to --depth hops, and every
+registered test found is reported. A file whose dependents reach more than --hub-limit GPU tests (arguments,
+launcher utils) is a hub and is not followed: a change there needs domain labels, not a file list. Other dynamic
+loading is not seen; read the list.
 """
 
 import argparse
@@ -18,9 +19,10 @@ import re
 import subprocess
 import warnings
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
-from tests.ci.ci_register import HWBackend, collect_tests, discover_ci_files
+from tests.ci.ci_register import CIRegistry, HWBackend, collect_tests, discover_ci_files
 from tests.ci.stage_selection import known_no_gpu_path
 
 SOURCE_ROOTS = ("miles", "miles_plugins", "scripts", "examples", "tests")
@@ -108,18 +110,16 @@ def source_graph(changed: list[str]) -> tuple[dict[str, set[str]], dict[str, str
     return imports, texts, literals
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--base", default="origin/main")
-    parser.add_argument("--depth", type=int, default=3, help="importer hops to follow")
-    parser.add_argument(
-        "--hub-limit", type=int, default=40, help="a file reaching more enabled CUDA tests than this is a hub"
-    )
-    args = parser.parse_args()
-    warnings.filterwarnings("ignore", category=SyntaxWarning)
+@dataclass(frozen=True)
+class Trace:
+    reached: dict[str, str]  # registered test -> the changed or intermediate file it was reached from
+    hubs: dict[str, int]  # file -> enabled CUDA tests its dependents reach
+    outside_trace: list[str]
+    on_training_path: list[str]
+    unreferenced: list[str]
 
-    changed = changed_files(args.base)
-    registrations = {path: collect_tests([path]) for path in discover_ci_files()}
+
+def trace(changed: list[str], registrations: dict[str, list[CIRegistry]], *, depth: int, hub_limit: int) -> Trace:
     gpu_tests = {
         path for path, rs in registrations.items() if any(r.backend == HWBackend.CUDA and not r.disabled for r in rs)
     }
@@ -142,6 +142,8 @@ def main() -> None:
         refs = importers.get(path, set()) | {
             other for other, values in literals.items() if any(path in v for v in values)
         }
+        if Path(path).name == "conftest.py":
+            refs |= {test for test in registrations if test.startswith(f"{Path(path).parent}/")}
         if path.startswith("scripts/models/"):
             pattern = model_name_pattern(Path(path).stem)
             refs |= {other for other, values in literals.items() if any(pattern.search(v) for v in values)}
@@ -149,91 +151,124 @@ def main() -> None:
 
     @functools.cache
     def gpu_reach(path: str) -> int:
-        """Enabled CUDA tests within --depth hops of `path`: how broad a change to it is."""
         found, frontier, seen = set(), {path}, {path}
-        for _ in range(args.depth + 1):
+        for _ in range(depth + 1):
             frontier = {ref for node in frontier for ref in referrers(node)} - seen
             seen |= frontier
             found |= frontier & gpu_tests
             frontier -= set(registrations)
         return len(found)
 
-    reached: dict[str, str] = {path: "changed" for path in changed if path in registrations}
+    reached = {path: "changed" for path in changed if path in registrations}
     frontier = [path for path in changed if path not in registrations and not known_no_gpu_path(path)]
     seen = set(frontier)
     hubs: dict[str, int] = {}
     unreferenced = []
-    for hop in range(args.depth + 1):
+    for hop in range(depth + 1):
         next_frontier = []
         for path in frontier:
             if hop == 0 and path.endswith(".py") and not referrers(path):
                 unreferenced.append(path)
-            if gpu_reach(path) > args.hub_limit:
+            if gpu_reach(path) > hub_limit:
                 hubs[path] = gpu_reach(path)
                 continue
             for ref in sorted(referrers(path)):
                 if ref in registrations:
                     reached.setdefault(ref, f"{path} (hop {hop})")
-                elif hop < args.depth and ref not in seen:
+                elif hop < depth and ref not in seen:
                     seen.add(ref)
                     next_frontier.append(ref)
         frontier = next_frontier
 
-    rows = [(test, registry) for test in sorted(reached) for registry in registrations[test]]
-    print(f"{len(changed)} changed files vs {args.base}; {len(rows)} registered tests reached\n")
+    return Trace(
+        reached=reached,
+        hubs=hubs,
+        outside_trace=sorted(
+            path
+            for path in changed
+            if not path.endswith(".py") and path not in registrations and not known_no_gpu_path(path)
+        ),
+        on_training_path=sorted(set(changed) & run_by_training),
+        unreferenced=sorted(unreferenced),
+    )
+
+
+def rerun_targets(result: Trace, registrations: dict[str, list[CIRegistry]]) -> list[str]:
+    """Reached tests a PR run would skip without a label: enabled CUDA tests and labeled CPU tests."""
+    return sorted(
+        test
+        for test in result.reached
+        if any(
+            not r.disabled and (r.backend == HWBackend.CUDA or (r.backend == HWBackend.CPU and r.labels))
+            for r in registrations[test]
+        )
+    )
+
+
+def print_report(
+    result: Trace, registrations: dict[str, list[CIRegistry]], *, base: str, n_changed: int, hub_limit: int
+) -> None:
+    rows = [(test, r) for test in sorted(result.reached) for r in registrations[test]]
+    print(f"{n_changed} changed files vs {base}; {len(rows)} registered tests reached\n")
     print("| test | backend | suite | labels | hardware | est_time | disabled | reached via |")
     print("|---|---|---|---|---|---|---|---|")
     for test, r in rows:
         print(
             f"| {test} | {r.backend.name} | {r.suite} | {','.join(r.labels)} | {','.join(r.hardware)} "
-            f"| {r.est_time:.0f} | {r.disabled or ''} | {reached[test]} |"
+            f"| {r.est_time:.0f} | {r.disabled or ''} | {result.reached[test]} |"
         )
 
-    gated = [
-        (test, r)
-        for test, r in rows
-        if not r.disabled and (r.backend == HWBackend.CUDA or (r.backend == HWBackend.CPU and r.labels))
-    ]
-    print(f"\n/rerun-test comments for the {len(gated)} enabled CUDA and labeled CPU tests (one comment each):")
-    for test, _ in gated:
+    targets = rerun_targets(result, registrations)
+    print(f"\n/rerun-test comments for the {len(targets)} enabled CUDA and labeled CPU tests (one comment each):")
+    for test in targets:
         print(f"/rerun-test {test}")
 
-    label_cost = Counter(
-        label
-        for rs in registrations.values()
-        for r in rs
-        if r.backend in (HWBackend.CUDA, HWBackend.CPU) and not r.disabled
-        for label in r.labels
+    enabled = [r for rs in registrations.values() for r in rs if not r.disabled and r.backend != HWBackend.ROCM]
+    label_cost = Counter(label for r in enabled for label in r.labels)
+    needed = Counter(
+        label for test in targets for r in registrations[test] if r.backend != HWBackend.ROCM for label in r.labels
     )
-    needed = Counter(label for _, r in gated for label in r.labels)
     print("\nDomain labels of those tests (reached / all enabled tests carrying the label):")
     for label, count in needed.most_common():
         print(f"  run-ci-{label}: {count} / {label_cost[label]}")
-    if hubs:
-        print(f"\nHubs not followed (each reaches more than {args.hub_limit} GPU tests; needs domain labels):")
-        for path, count in sorted(hubs.items(), key=lambda item: -item[1]):
-            print(f"  {path}: reaches {count} GPU tests{' (changed)' if path in changed else ''}")
-    outside_trace = sorted(
-        path
-        for path in changed
-        if not path.endswith(".py") and path not in registrations and not known_no_gpu_path(path)
+
+    sections = [
+        (
+            f"Hubs not followed (each reaches more than {hub_limit} GPU tests; needs domain labels)",
+            [f"{path}: reaches {count} GPU tests" for path, count in sorted(result.hubs.items(), key=lambda i: -i[1])],
+        ),
+        ("Changed paths that affect GPU runtime outside the import trace (need label-based CI)", result.outside_trace),
+        (
+            "Changed files the training entry points load (every e2e training run executes them; the trace stops at"
+            " the launcher hub, so add the domain labels of the training paths they change)",
+            result.on_training_path,
+        ),
+        (
+            "Changed Python files nothing imports or names (entry points, or loaded some other way; check)",
+            result.unreferenced,
+        ),
+    ]
+    for title, lines in sections:
+        if lines:
+            print(f"\n{title}:")
+            for line in lines:
+                print(f"  {line}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--base", default="origin/main")
+    parser.add_argument("--depth", type=int, default=3, help="importer hops to follow")
+    parser.add_argument(
+        "--hub-limit", type=int, default=40, help="a file reaching more enabled CUDA tests than this is a hub"
     )
-    if outside_trace:
-        print("\nChanged paths that affect GPU runtime outside the import trace (need label-based CI):")
-        for path in outside_trace:
-            print(f"  {path}")
-    on_training_path = sorted(set(changed) & run_by_training)
-    if on_training_path:
-        print(
-            "\nChanged files the training entry points load (every e2e training run executes them; the import trace"
-            " stops at the launcher hub, so add the domain labels of the training paths they change):"
-        )
-        for path in on_training_path:
-            print(f"  {path}")
-    if unreferenced:
-        print("\nChanged Python files nothing imports or names (entry points, or loaded some other way; check):")
-        for path in sorted(unreferenced):
-            print(f"  {path}")
+    args = parser.parse_args()
+    warnings.filterwarnings("ignore", category=SyntaxWarning)
+
+    changed = changed_files(args.base)
+    registrations = {path: collect_tests([path]) for path in discover_ci_files()}
+    result = trace(changed, registrations, depth=args.depth, hub_limit=args.hub_limit)
+    print_report(result, registrations, base=args.base, n_changed=len(changed), hub_limit=args.hub_limit)
 
 
 if __name__ == "__main__":
