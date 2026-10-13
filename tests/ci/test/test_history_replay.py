@@ -342,6 +342,44 @@ class TestChronologicalReplay:
         assert report["checked"] == report["passed"] == report["enforcement_checked"] == 0
 
 
+class TestHistoryHealth:
+    def test_one_sided_failure_streak_marks_history_stale(self, specs):
+        rows = [_row(specs, i, 1.0) for i in range(11)]
+        rows += [_row(specs, i, 2.0, trusted=False) for i in range(11, 14)]
+        report = replay.replay(rows, specs)
+        [stale] = report["stale_coordinates"]
+        assert [r["run_id"] for r in stale["recent"]] == [11, 12, 13]
+        assert stale["baseline_mean"] == 1.0
+        assert stale["reset_run_ids"] == list(range(11))
+        assert report["zero_flip_coordinates"] == []
+
+    @pytest.mark.parametrize("tail", [[2.0, 0.5, 2.0], [2.0, 2.0, 1.0], [2.0, 2.0]])
+    def test_mixed_direction_passing_or_short_tails_are_not_stale(self, specs, tail):
+        rows = [_row(specs, i, 1.0) for i in range(11)]
+        rows += [_row(specs, 11 + i, value, trusted=False) for i, value in enumerate(tail)]
+        report = replay.replay(rows, specs)
+        assert report["failures"]
+        assert report["stale_coordinates"] == []
+
+    def test_alternating_exact_zeros_are_zero_flips_not_stale(self, specs):
+        rows = [_row(specs, i, float(i % 2)) for i in range(14)]
+        report = replay.replay(rows, specs)
+        assert report["failures"]
+        assert report["stale_coordinates"] == []
+        [flip] = report["zero_flip_coordinates"]
+        assert (flip["zero_values"], flip["nonzero_values"]) == (7, 7)
+
+    @pytest.mark.parametrize("before, after", [(0.0, 0.25), (1.0, 0.0)])
+    def test_one_sided_streak_beside_exact_zeros_is_in_both_lists(self, specs, before, after):
+        rows = [_row(specs, i, before) for i in range(11)]
+        rows += [_row(specs, i, after, trusted=False) for i in range(11, 14)]
+        report = replay.replay(rows, specs)
+        [stale] = report["stale_coordinates"]
+        [flip] = report["zero_flip_coordinates"]
+        assert stale["reset_run_ids"] == list(range(11))
+        assert flip["zero_values"] + flip["nonzero_values"] == 14
+
+
 class TestInvalidRows:
     @pytest.mark.parametrize(
         "fault",

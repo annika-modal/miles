@@ -30,6 +30,9 @@ _COLUMNS = [
     "trusted",
     "values",
 ]
+# Consecutive latest failures on one side of the baseline that mark a
+# coordinate's trusted history as stale rather than noisy.
+STALE_STREAK = 3
 
 
 def enforced_specs() -> dict[tuple[str, str, str, str], CiGateSpec]:
@@ -145,7 +148,7 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
             for step in steps:
                 coordinates.setdefault((*declaration, suite, step), [])
 
-    failures, coverage = [], []
+    failures, coverage, stale, zero_flips = [], [], [], []
     eligible_declarations = set()
     totals = dict(
         values=0,
@@ -165,8 +168,11 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
     for key, points in sorted(coordinates.items()):
         declaration, suite, step = key[:4], key[4], key[5]
         spec = specs[declaration]
+        coordinate = dict(
+            test_path=key[0], suite=suite, metric_key=key[1], steps_key=key[2], constraint_key=key[3], step=step
+        )
         stats = {name: 0 for name in totals}
-        history = []
+        history, outcomes = [], []
         # Timestamp peers must all be evaluated before any enters history.
         for _, peers in groupby(sorted(points, key=lambda p: (p[0], p[1]["run_id"])), key=lambda p: p[0]):
             peers = list(peers)
@@ -187,6 +193,7 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
                 trust = "trusted" if row["trusted"] else "untrusted"
                 stats[f"{trust}_checked"] += 1
                 failed = result.historical_status != GateStatus.PASS
+                outcomes.append((row, value, failed, result.baseline_mean))
                 stats["failed" if failed else "passed"] += 1
                 stats["enforcement_failed"] += int(failed and eligible)
                 stats[f"{trust}_failed"] += int(failed)
@@ -194,12 +201,7 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
                 if failed:
                     failures.append(
                         dict(
-                            test_path=key[0],
-                            suite=suite,
-                            metric_key=key[1],
-                            steps_key=key[2],
-                            constraint_key=key[3],
-                            step=step,
+                            **coordinate,
                             run_id=row["run_id"],
                             created_at=row["created_at"],
                             github_run_id=row["github_run_id"],
@@ -214,17 +216,29 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
                         )
                     )
             history.extend((timestamp, row["run_id"], value) for timestamp, row, value in peers if row["trusted"])
-        coverage.append(
-            dict(
-                test_path=key[0],
-                suite=suite,
-                metric_key=key[1],
-                steps_key=key[2],
-                constraint_key=key[3],
-                step=step,
-                **stats,
+        coverage.append(dict(**coordinate, **stats))
+        values = [value for _, _, value in points]
+        streak = outcomes[-STALE_STREAK:]
+        # The lists are independent; a coordinate in both needs its values read before choosing a fix.
+        if (
+            len(streak) == STALE_STREAK
+            and all(f for _, _, f, _ in streak)
+            and len({v > mean for _, v, _, mean in streak}) == 1
+        ):
+            stale.append(
+                dict(
+                    **coordinate,
+                    baseline_mean=streak[-1][3],
+                    recent=[dict(run_id=r["run_id"], created_at=r["created_at"], current=v) for r, v, _, _ in streak],
+                    reset_run_ids=[run_id for _, run_id, _ in history],
+                )
             )
-        )
+        if stats["failed"] and 0 in values and any(values):
+            # Exact zeros beside nonzero values may leave no band to tune, so
+            # enforce=False may fit better than a history reset.
+            zero_flips.append(
+                dict(**coordinate, zero_values=values.count(0), nonzero_values=len(values) - values.count(0))
+            )
         for name, count in stats.items():
             totals[name] += count
     missing = [
@@ -252,6 +266,8 @@ def replay(rows: list[dict], specs: dict[tuple[str, str, str, str], CiGateSpec])
         runs_with_missing_values=runs_with_missing_values,
         coverage=coverage,
         failures=failures,
+        stale_coordinates=stale,
+        zero_flip_coordinates=zero_flips,
     )
 
 
