@@ -14,7 +14,7 @@ import time
 import pytest
 import torch
 
-_NUM_GPUS = 4
+_NUM_GPUS = torch.cuda.device_count()
 _NBYTES = 256 << 20
 _TIMEOUT_S = 300
 
@@ -96,7 +96,7 @@ def _get(out: mp.Queue, kind: str, deadline: float, procs: list) -> tuple:
 
 
 def test_p2p_transfer_reaches_every_engine_gpu():
-    assert torch.cuda.device_count() >= _NUM_GPUS
+    assert _NUM_GPUS >= 2, _NUM_GPUS
     _print_rdma_view()
     ctx = mp.get_context("spawn")
     out, verify = ctx.Queue(), ctx.Event()

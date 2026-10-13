@@ -223,13 +223,7 @@ jobs:
 
   stage-b-2-gpu-h200:
     needs: [resolve-ci-policy, resolve-ci-image, stage-a-cpu]
-    if: |
-      always() && !cancelled() &&
-      needs.resolve-ci-policy.result == 'success' &&
-      needs.resolve-ci-image.result == 'success' &&
-      !contains(fromJSON(needs.resolve-ci-policy.outputs.skipped_stages || '[]'), 'stage-b-2-gpu-h200') &&
-      (needs.stage-a-cpu.result == 'success' ||
-        needs.resolve-ci-policy.outputs.bypass_fastfail == 'true')
+    if: false  # DNM (R1)
     strategy:
       fail-fast: false
       matrix:
@@ -249,13 +243,7 @@ jobs:
 
   stage-c-8-gpu-h100:
     needs: [resolve-ci-policy, resolve-ci-image, stage-a-cpu]
-    if: |
-      always() && !cancelled() &&
-      needs.resolve-ci-policy.result == 'success' &&
-      needs.resolve-ci-image.result == 'success' &&
-      !contains(fromJSON(needs.resolve-ci-policy.outputs.skipped_stages || '[]'), 'stage-c-8-gpu-h100') &&
-      (needs.stage-a-cpu.result == 'success' ||
-        needs.resolve-ci-policy.outputs.bypass_fastfail == 'true')
+    if: false  # DNM (R1)
     strategy:
       fail-fast: false
       matrix:
@@ -275,13 +263,7 @@ jobs:
 
   stage-c-8-gpu-h200:
     needs: [resolve-ci-policy, resolve-ci-image, stage-a-cpu]
-    if: |
-      always() && !cancelled() &&
-      needs.resolve-ci-policy.result == 'success' &&
-      needs.resolve-ci-image.result == 'success' &&
-      !contains(fromJSON(needs.resolve-ci-policy.outputs.skipped_stages || '[]'), 'stage-c-8-gpu-h200') &&
-      (needs.stage-a-cpu.result == 'success' ||
-        needs.resolve-ci-policy.outputs.bypass_fastfail == 'true')
+    if: false  # DNM (R1)
     strategy:
       fail-fast: false
       matrix:
@@ -300,42 +282,25 @@ jobs:
     secrets: inherit
 
   stage-c-4-gpu-h200:
-    needs: [resolve-ci-policy, resolve-ci-image, stage-a-cpu]
-    if: |
-      always() && !cancelled() &&
-      needs.resolve-ci-policy.result == 'success' &&
-      needs.resolve-ci-image.result == 'success' &&
-      !contains(fromJSON(needs.resolve-ci-policy.outputs.skipped_stages || '[]'), 'stage-c-4-gpu-h200') &&
-      (needs.stage-a-cpu.result == 'success' ||
-        needs.resolve-ci-policy.outputs.bypass_fastfail == 'true')
+    # DNM (R1): the Mooncake probe once per runner, only on runners carrying the `aliyun` label.
+    needs: [resolve-ci-policy, resolve-ci-image]
+    if: always() && !cancelled() && needs.resolve-ci-policy.result == 'success' && needs.resolve-ci-image.result == 'success'
     strategy:
       fail-fast: false
       matrix:
-        partition_id: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        runner: [aliyun-2-4gpu-0, aliyun-2-4gpu-1, aliyun-1-4gpu-0, aliyun-1-2gpu-0, aliyun-1-2gpu-1]
     uses: ./.github/workflows/_run-ci.yml
     with:
-      runs_on: '["h200", "4gpu"]'
-      # Allow the long solver/verifier test, other shard tests, and setup.
-      timeout_minutes: 600
+      runs_on: ${{ format('["{0}", "aliyun"]', matrix.runner) }}
+      timeout_minutes: 30
       container_image: ${{ needs.resolve-ci-image.outputs.container_image }}
       ref: ${{ inputs.ref || '' }}
-      execute_command: >-
-        python tests/ci/run_suite.py --hw cuda --suite stage-c-4-gpu-h200
-        --auto-partition-id ${{ matrix.partition_id }} --auto-partition-size ${{ strategy.job-total }}
-        --cadence ${{ needs.resolve-ci-policy.outputs.cadence }}
-        --labels ${{ needs.resolve-ci-policy.outputs.raw_labels }}
-        ${{ github.event_name == 'workflow_dispatch' && '--match-all-labels' || '' }}
+      execute_command: python3 tests/fast-gpu/test_mooncake_p2p_transport.py
     secrets: inherit
 
   stage-c-2-gpu-h200:
     needs: [resolve-ci-policy, resolve-ci-image, stage-a-cpu]
-    if: |
-      always() && !cancelled() &&
-      needs.resolve-ci-policy.result == 'success' &&
-      needs.resolve-ci-image.result == 'success' &&
-      !contains(fromJSON(needs.resolve-ci-policy.outputs.skipped_stages || '[]'), 'stage-c-2-gpu-h200') &&
-      (needs.stage-a-cpu.result == 'success' ||
-        needs.resolve-ci-policy.outputs.bypass_fastfail == 'true')
+    if: false  # DNM (R1)
     strategy:
       fail-fast: false
       matrix:
@@ -356,14 +321,7 @@ jobs:
   # Select both B200 suites into one pool of independently runnable tests.
   stage-c-b200:
     needs: [resolve-ci-policy, resolve-ci-image, stage-a-cpu]
-    if: |
-      always() && !cancelled() &&
-      needs.resolve-ci-policy.result == 'success' &&
-      needs.resolve-ci-image.result == 'success' &&
-      (!contains(fromJSON(needs.resolve-ci-policy.outputs.skipped_stages || '[]'), 'stage-c-8-gpu-b200') ||
-        !contains(fromJSON(needs.resolve-ci-policy.outputs.skipped_stages || '[]'), 'stage-c-4-gpu-b200')) &&
-      (needs.stage-a-cpu.result == 'success' ||
-        needs.resolve-ci-policy.outputs.bypass_fastfail == 'true')
+    if: false  # DNM (R1)
     uses: ./.github/workflows/_run-ci-b200.yml
     with:
       container_image: ${{ needs.resolve-ci-image.outputs.container_image }}
