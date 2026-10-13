@@ -48,7 +48,8 @@ It prints:
 The trace builds the import graph with `ast`: absolute, relative and
 `from pkg import module` imports, bare imports of a sibling file put on
 `sys.path`, and dotted module paths or file paths inside string literals
-(`--custom-loss-function-path`, `python tools/x.py` subprocesses). A changed
+(`--custom-loss-function-path`, `python tools/x.py` subprocesses, and a
+sibling helper loaded by file name with `spec_from_file_location`). A changed
 `conftest.py` reaches every registered test under its directory, since pytest
 loads it without an import. A model definition under `scripts/models/` is
 matched by its name in string literals (`--model-name`), including variants

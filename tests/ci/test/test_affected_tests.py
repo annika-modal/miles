@@ -116,6 +116,27 @@ def test_dotted_module_and_file_paths_in_string_literals_are_edges(repo):
     assert set(_trace(["tools/convert.py"], registrations).reached) == {"tests/e2e/test_convert.py"}
 
 
+def test_helper_loaded_by_file_name_or_path_suffix_reaches_its_tests(repo):
+    load = 'spec_from_file_location("ref", pathlib.Path(__file__).with_name("dsa_reference.py"))\n'
+    repo(
+        {
+            "tests/fast-gpu/kernels/dsa/dsa_reference.py": "",
+            "tests/fast-gpu/kernels/dsa/test_dsa.py": load,
+            "tests/fast-gpu/kernels/other/test_other.py": load,
+            "tests/e2e/test_bench.py": 'REF = ROOT / "fast-gpu/kernels/dsa/dsa_reference.py"\n',
+        }
+    )
+    registrations = [
+        _gpu("tests/fast-gpu/kernels/dsa/test_dsa.py"),
+        _gpu("tests/fast-gpu/kernels/other/test_other.py"),
+        _gpu("tests/e2e/test_bench.py"),
+    ]
+
+    result = _trace(["tests/fast-gpu/kernels/dsa/dsa_reference.py"], registrations)
+
+    assert set(result.reached) == {"tests/fast-gpu/kernels/dsa/test_dsa.py", "tests/e2e/test_bench.py"}
+
+
 def test_model_name_matches_whole_names_and_variants_but_not_longer_names(repo):
     repo(
         {

@@ -94,6 +94,15 @@ def model_name_pattern(stem: str) -> re.Pattern:
     return re.compile(rf"(?<![\w.-]){re.escape(stem)}(?![\w.])")
 
 
+def literal_names_file(literal: str, holder: str, path: str) -> bool:
+    """`literal` in `holder` names `path`: the whole path, a path suffix, or a bare file name next to `holder`."""
+    if path in literal:
+        return True
+    if "/" in literal:
+        return literal.endswith(".py") and f"/{path}".endswith(f"/{literal.lstrip('/')}")
+    return literal == Path(path).name and Path(holder).parent == Path(path).parent
+
+
 def string_literals(tree: ast.Module) -> list[str]:
     return [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str)]
 
@@ -135,12 +144,14 @@ def trace(changed: list[str], registrations: dict[str, list[CIRegistry]], *, dep
             run_by_training.add(path)
             frontier.extend(imports.get(path, ()))
 
+    py_literals = {path: [v for v in values if ".py" in v] for path, values in literals.items()}
+
     @functools.cache
     def referrers(path: str) -> frozenset[str]:
         if not path.endswith(".py"):
             return frozenset(other for other, text in texts.items() if path in text)
         refs = importers.get(path, set()) | {
-            other for other, values in literals.items() if any(path in v for v in values)
+            other for other, values in py_literals.items() if any(literal_names_file(v, other, path) for v in values)
         }
         if Path(path).name == "conftest.py":
             refs |= {test for test in registrations if test.startswith(f"{Path(path).parent}/")}
