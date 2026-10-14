@@ -546,3 +546,51 @@ class TestTheChecksumRecordKeepsOnlyThisPublication:
 
         assert self._recorded(event_log_dir) == []
         assert "Could not record inference engine checksum observation" in caplog.text
+
+
+class TestChecksumCollectionOwnsTheUpdateWindow:
+    async def test_reconciliation_waits_until_checksum_collection_finishes(self) -> None:
+        """A competing controller operation must not replace cells before their checksums are collected."""
+        from miles.ray.placement_group import update_weights
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        reconciled = asyncio.Event()
+        args = _orchestration_args()
+
+        async def check_weights(**kwargs: object) -> list[tuple[ServerCellMetadata, dict[str, Any]]]:
+            entered.set()
+            await release.wait()
+            return _checksum_response([{"w": "current"}])
+
+        controller = make_checksum_controller(
+            args=args, snapshot={"cell-0": "incarnation-0"}, check_weights=check_weights
+        )
+
+        async def reconcile() -> None:
+            async with controller.context_lock:
+                reconciled.set()
+
+        with patch("miles.ray.placement_group.is_event_logger_initialized", return_value=True), patch(
+            "miles.ray.placement_group.get_event_logger"
+        ):
+            async with asyncio.timeout(5):
+                update = asyncio.create_task(update_weights(
+                    args, _actor_model([]), SimpleNamespace(set_weight_version=AsyncMock()), controller,
+                ))
+                contender = None
+                try:
+                    await entered.wait()
+                    contender = asyncio.create_task(reconcile())
+                    await asyncio.sleep(0)
+                    assert not reconciled.is_set()
+                    assert controller.servers["default"].all_server_cells["cell-0"].is_pending_weights
+                finally:
+                    release.set()
+                    await update
+                    if contender is not None:
+                        await contender
+
+        assert reconciled.is_set()
+        assert not controller.context_lock.locked
+        assert not controller.servers["default"].all_server_cells["cell-0"].is_pending_weights
