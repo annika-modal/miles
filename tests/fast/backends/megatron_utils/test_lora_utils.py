@@ -10,7 +10,6 @@ import miles.backends.megatron_utils.lora.utils as lora_utils
 from miles.backends.megatron_utils.lora.utils import (
     _is_adapter_param_name,
     is_lora_enabled,
-    load_lora_adapter,
     save_lora_checkpoint,
 )
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, is_lora_weight_name
@@ -122,24 +121,6 @@ def _single_rank(monkeypatch):
     )
 
 
-def test_load_lora_adapter_rejects_a_shard_that_does_not_match_the_adapter(tmp_path, monkeypatch):
-    """A silently partial load resumes training on a half-initialized adapter."""
-    _single_rank(monkeypatch)
-    torch.save({"lora_A": torch.ones(1, 2), "stale_lora_C": torch.ones(1)}, tmp_path / "adapter_megatron_rank0.pt")
-
-    with pytest.raises(RuntimeError, match=r"missing=\['lora_B'\], unexpected=\['stale_lora_C'\]"):
-        lora_utils.load_lora_adapter([_AdapterModel()], str(tmp_path))
-
-
-def test_load_lora_adapter_rejects_shards_saved_under_another_layout(tmp_path, monkeypatch):
-    """Falling through to fresh adapter weights would hide a resharding mistake."""
-    _single_rank(monkeypatch)
-    torch.save({"lora_A": torch.ones(1, 2)}, tmp_path / "adapter_megatron_rank1.pt")
-
-    with pytest.raises(FileNotFoundError, match="none for global rank 0"):
-        lora_utils.load_lora_adapter([_AdapterModel()], str(tmp_path))
-
-
 class TestSaveLoraCheckpointTrainingState:
     def _save(self, tmp_path, *, no_save_optim, scheduler=None):
         publisher = SimpleNamespace(write_adapter=lambda *_: None)
@@ -186,131 +167,6 @@ class TestSaveLoraCheckpointTrainingState:
         assert state["iteration"] == 3
 
 
-class TestLoadTrainingState:
-    @staticmethod
-    def _recorder():
-        loaded = []
-        return loaded, SimpleNamespace(load_state_dict=loaded.append)
-
-    def _write(self, tmp_path, optimizer_state):
-        torch.save(
-            {"iteration": 3, "optimizer": optimizer_state, "opt_param_scheduler": {"lr": 0.5}},
-            tmp_path / "training_state_rank0.pt",
-        )
-
-    def test_an_optimizer_free_checkpoint_still_restores_the_step_and_the_schedule(self, tmp_path):
-        self._write(tmp_path, None)
-        optimizer_loads, optimizer = self._recorder()
-        scheduler_loads, scheduler = self._recorder()
-
-        assert lora_utils._load_training_state(tmp_path, optimizer, scheduler) == (3, False)
-        assert optimizer_loads == []
-        assert scheduler_loads == [{"lr": 0.5}]
-
-    def test_a_full_checkpoint_restores_the_optimizer(self, tmp_path):
-        self._write(tmp_path, {"step": 7})
-        optimizer_loads, optimizer = self._recorder()
-        scheduler_loads, scheduler = self._recorder()
-
-        assert lora_utils._load_training_state(tmp_path, optimizer, scheduler) == (3, True)
-        assert optimizer_loads == [{"step": 7}]
-        assert scheduler_loads == [{"lr": 0.5}]
-
-
-class TestLoadTrainingStateOptimizerGate:
-    """--no-load-optim must keep the fresh optimizer without losing the step or the LR schedule."""
-
-    @staticmethod
-    def _recorder():
-        loaded = []
-        return loaded, SimpleNamespace(load_state_dict=loaded.append, reload_model_params=lambda: None)
-
-    @staticmethod
-    def _write_training_state(tmp_path):
-        torch.save(
-            {"iteration": 11, "optimizer": {"step": 7}, "opt_param_scheduler": {"lr": 0.5}},
-            tmp_path / "training_state_rank0.pt",
-        )
-
-    def test_no_load_optim_skips_the_optimizer_and_keeps_the_rest(self, tmp_path):
-        self._write_training_state(tmp_path)
-        optimizer_loads, optimizer = self._recorder()
-        scheduler_loads, scheduler = self._recorder()
-
-        assert lora_utils._load_training_state(tmp_path, optimizer, scheduler, load_optimizer=False) == (11, False)
-        assert optimizer_loads == []
-        assert scheduler_loads == [{"lr": 0.5}]
-
-    def test_load_lora_adapter_forwards_the_flag(self, tmp_path, monkeypatch):
-        rank0 = SimpleNamespace(rank=0)
-        monkeypatch.setattr(lora_utils, "get_parallel_state", lambda: SimpleNamespace(tp=rank0, pp=rank0))
-        name = "layers.0.self_attention.lora_A.weight"
-        torch.save({name: torch.ones(2)}, tmp_path / "adapter_megatron_rank0.pt")
-        self._write_training_state(tmp_path)
-        model = [SimpleNamespace(named_parameters=lambda: [(name, torch.nn.Parameter(torch.zeros(2)))])]
-        optimizer_loads, optimizer = self._recorder()
-        scheduler_loads, scheduler = self._recorder()
-
-        loaded, iteration, optimizer_restored = load_lora_adapter(
-            model,
-            str(tmp_path),
-            optimizer=optimizer,
-            opt_param_scheduler=scheduler,
-            load_optimizer=False,
-        )
-
-        assert (loaded, iteration, optimizer_restored) == (True, 11, False)
-        assert optimizer_loads == []
-        assert scheduler_loads == [{"lr": 0.5}]
-
-
-class TestLoadLoraAdapterRefreshesMasters:
-    """The optimizer's fp32 masters are built before the adapter loads; unless the checkpoint's
-    optimizer state replaces them, the first step() writes the initial adapter back."""
-
-    @staticmethod
-    def _optimizer():
-        calls = []
-        optimizer = SimpleNamespace(
-            load_state_dict=lambda state: calls.append("load_state_dict"),
-            reload_model_params=lambda: calls.append("reload_model_params"),
-        )
-        return calls, optimizer
-
-    @staticmethod
-    def _write_checkpoint(tmp_path, optimizer_state):
-        torch.save({"lora_A": torch.ones(1, 2), "lora_B": torch.ones(2, 1)}, tmp_path / "adapter_megatron_rank0.pt")
-        torch.save(
-            {"iteration": 5, "optimizer": optimizer_state, "opt_param_scheduler": None},
-            tmp_path / "training_state_rank0.pt",
-        )
-
-    @pytest.mark.parametrize(
-        "optimizer_state,load_optimizer", [({"step": 7}, False), (None, True)], ids=["no-load-optim", "no-state"]
-    )
-    def test_masters_are_refreshed_when_the_optimizer_is_not_restored(
-        self, tmp_path, monkeypatch, optimizer_state, load_optimizer
-    ):
-        _single_rank(monkeypatch)
-        self._write_checkpoint(tmp_path, optimizer_state)
-        calls, optimizer = self._optimizer()
-
-        lora_utils.load_lora_adapter(
-            [_AdapterModel()], str(tmp_path), optimizer=optimizer, load_optimizer=load_optimizer
-        )
-
-        assert calls == ["reload_model_params"]
-
-    def test_restored_optimizer_state_keeps_its_masters(self, tmp_path, monkeypatch):
-        _single_rank(monkeypatch)
-        self._write_checkpoint(tmp_path, {"step": 7})
-        calls, optimizer = self._optimizer()
-
-        lora_utils.load_lora_adapter([_AdapterModel()], str(tmp_path), optimizer=optimizer)
-
-        assert calls == ["load_state_dict"]
-
-
 class TestDistributedOptimizerParameterState:
     """DistributedOptimizer.state_dict() omits the fp32 masters and Adam moments; loading it alone
     leaves uninitialized moments and the initial masters, which the first step() writes back."""
@@ -345,35 +201,124 @@ class TestDistributedOptimizerParameterState:
         (parameter_state,) = state["parameter_state"]
         torch.testing.assert_close(parameter_state[0][torch.float32][0][0]["param"], torch.ones(2))
 
-    def test_a_checkpoint_without_parameter_state_is_not_restored(self, tmp_path, monkeypatch):
-        _single_rank(monkeypatch)
-        calls = []
-        monkeypatch.setattr(lora_utils, "_distributed_optimizers", lambda _optimizer: [self._distributed(calls)])
-        TestLoadLoraAdapterRefreshesMasters._write_checkpoint(tmp_path, {"step": 7})
 
-        _loaded, _iteration, restored = lora_utils.load_lora_adapter(
-            [_AdapterModel()], str(tmp_path), optimizer=self._optimizer(calls)
+class TestRestoreLoraAdapter:
+    """--lora-adapter-path restores exactly what its format carries; anything the run asks for and
+    the checkpoint cannot give fails instead of silently training a fresh adapter or optimizer."""
+
+    @staticmethod
+    def _args(tmp_path, *, no_load_optim, mode="raw"):
+        return Namespace(lora_adapter_path=str(tmp_path), no_load_optim=no_load_optim, megatron_to_hf_mode=mode)
+
+    @staticmethod
+    def _optimizer(calls):
+        return SimpleNamespace(
+            load_state_dict=lambda state: calls.append(("load_state_dict", state)),
+            reload_model_params=lambda: calls.append(("reload_model_params", None)),
         )
 
-        assert not restored
-        assert [name for name, _ in calls] == ["reload_model_params"]
+    @staticmethod
+    def _write_native(tmp_path, **training_state):
+        torch.save({"lora_A": torch.ones(1, 2), "lora_B": torch.ones(2, 1)}, tmp_path / "adapter_megatron_rank0.pt")
+        if training_state:
+            state = {"iteration": 5, "optimizer": {"step": 7}, "opt_param_scheduler": {"lr": 0.5}} | training_state
+            torch.save(state, tmp_path / "training_state_rank0.pt")
 
-    def test_a_full_checkpoint_restores_the_parameter_state(self, tmp_path, monkeypatch):
+    def _restore(self, tmp_path, calls, *, no_load_optim, scheduler=None, mode="raw"):
+        return lora_utils.restore_lora_adapter(
+            [_AdapterModel()],
+            self._args(tmp_path, no_load_optim=no_load_optim, mode=mode),
+            optimizer=self._optimizer(calls),
+            opt_param_scheduler=scheduler,
+        )
+
+    def test_a_full_checkpoint_restores_the_optimizer_scheduler_and_step(self, tmp_path, monkeypatch):
         _single_rank(monkeypatch)
         calls = []
-        distributed = self._distributed(calls)
+        parameter_state = {"per_bucket_numel": {}, 0: {torch.float32: [[{"param": torch.ones(2), "padding": False}]]}}
+        distributed = SimpleNamespace(
+            load_parameter_state_from_dp_reshardable=lambda state: calls.append(("parameter_state", state))
+        )
         monkeypatch.setattr(lora_utils, "_distributed_optimizers", lambda _optimizer: [distributed])
-        TestLoadLoraAdapterRefreshesMasters._write_checkpoint(tmp_path, {"step": 7})
-        state_path = tmp_path / "training_state_rank0.pt"
-        training_state = torch.load(state_path, weights_only=False)
-        training_state["parameter_state"] = [distributed.get_parameter_state_dp_reshardable()]
-        torch.save(training_state, state_path)
+        self._write_native(tmp_path, parameter_state=[parameter_state])
+        scheduler_loads = []
 
-        _loaded, _iteration, restored = lora_utils.load_lora_adapter(
-            [_AdapterModel()], str(tmp_path), optimizer=self._optimizer(calls)
+        iteration = self._restore(
+            tmp_path, calls, no_load_optim=False, scheduler=SimpleNamespace(load_state_dict=scheduler_loads.append)
         )
 
-        assert restored
+        assert iteration == 5
         assert [name for name, _ in calls] == ["load_state_dict", "parameter_state"]
-        (entry,) = calls[1][1][0][torch.float32][0]
-        assert entry["padding"] is False
+        assert scheduler_loads == [{"lr": 0.5}]
+
+    def test_no_load_optim_refreshes_the_masters_and_keeps_the_step_and_schedule(self, tmp_path, monkeypatch):
+        _single_rank(monkeypatch)
+        calls = []
+        self._write_native(tmp_path, parameter_state=[])
+        scheduler_loads = []
+
+        iteration = self._restore(
+            tmp_path, calls, no_load_optim=True, scheduler=SimpleNamespace(load_state_dict=scheduler_loads.append)
+        )
+
+        assert iteration == 5
+        assert calls == [("reload_model_params", None)]
+        assert scheduler_loads == [{"lr": 0.5}]
+
+    @pytest.mark.parametrize(
+        "training_state, message",
+        [
+            ({}, "no optimizer state"),
+            ({"optimizer": None, "parameter_state": None}, "no optimizer state"),
+            ({"optimizer": {"step": 7}}, "predates"),
+        ],
+        ids=["no-training-state", "saved-with-no-save-optim", "pre-parameter-state-format"],
+    )
+    def test_an_unrestorable_optimizer_fails_unless_no_load_optim(self, tmp_path, monkeypatch, training_state, message):
+        _single_rank(monkeypatch)
+        self._write_native(tmp_path, **training_state)
+
+        with pytest.raises(AssertionError, match=message):
+            self._restore(tmp_path, [], no_load_optim=False)
+
+    def test_an_hf_adapter_loads_weights_only(self, tmp_path, monkeypatch):
+        (tmp_path / "adapter_model.safetensors").write_bytes(b"")
+        loads = []
+        monkeypatch.setattr(lora_utils, "load_lora_adapter_hf", lambda model, path: loads.append(path))
+        _single_rank(monkeypatch)
+        calls = []
+
+        assert self._restore(tmp_path, calls, no_load_optim=True) is None
+        assert loads == [str(tmp_path.resolve())]
+        assert calls == [("reload_model_params", None)]
+        with pytest.raises(AssertionError, match="no optimizer state"):
+            self._restore(tmp_path, [], no_load_optim=False)
+
+    def test_an_hf_adapter_requires_raw_mode(self, tmp_path, monkeypatch):
+        (tmp_path / "adapter_model.safetensors").write_bytes(b"")
+        _single_rank(monkeypatch)
+
+        with pytest.raises(AssertionError, match="requires --megatron-to-hf-mode raw"):
+            self._restore(tmp_path, [], no_load_optim=True, mode="bridge")
+
+    def test_a_directory_without_an_adapter_fails(self, tmp_path, monkeypatch):
+        _single_rank(monkeypatch)
+
+        with pytest.raises(AssertionError, match="holds neither"):
+            self._restore(tmp_path, [], no_load_optim=True)
+
+    def test_a_shard_that_does_not_match_the_adapter_fails(self, tmp_path, monkeypatch):
+        """A silently partial load resumes training on a half-initialized adapter."""
+        _single_rank(monkeypatch)
+        torch.save({"lora_A": torch.ones(1, 2), "stale_lora_C": torch.ones(1)}, tmp_path / "adapter_megatron_rank0.pt")
+
+        with pytest.raises(RuntimeError, match=r"missing=\['lora_B'\], unexpected=\['stale_lora_C'\]"):
+            self._restore(tmp_path, [], no_load_optim=True)
+
+    def test_shards_saved_under_another_layout_fail(self, tmp_path, monkeypatch):
+        """Falling through to fresh adapter weights would hide a resharding mistake."""
+        _single_rank(monkeypatch)
+        torch.save({"lora_A": torch.ones(1, 2)}, tmp_path / "adapter_megatron_rank1.pt")
+
+        with pytest.raises(AssertionError, match="none for global rank 0"):
+            self._restore(tmp_path, [], no_load_optim=True)

@@ -18,7 +18,7 @@ from miles.backends.training_utils.weight_update.snapshot_publisher import Snaps
 from miles.utils import megatron_bridge_utils
 from miles_plugins.models.deepseek_v4.arguments import assert_checkpoint_is_current, is_dsv4_model
 
-from .lora.utils import is_lora_enabled, is_lora_model, load_lora_adapter, save_lora_checkpoint
+from .lora.utils import is_lora_model, save_lora_checkpoint
 from .model_provider import LinearForLastLayer
 
 try:
@@ -138,30 +138,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
             load_path=load_path,
         )
 
-    # Load LoRA adapter weights if available
-    native_optimizer_restored = False
-    if is_lora_enabled(args):
-        adapter_path = getattr(args, "lora_adapter_path", None)
-        if adapter_path is not None:
-            loaded, iteration, native_optimizer_restored = load_lora_adapter(
-                ddp_model,
-                adapter_path,
-                optimizer=optimizer,
-                opt_param_scheduler=opt_param_scheduler,
-                load_optimizer=not args.no_load_optim,
-            )
-            if loaded:
-                logger.info(f"Successfully loaded LoRA adapter from {adapter_path}")
-                if iteration is not None:
-                    result = (iteration, result[1])
-            else:
-                logger.warning(
-                    f"LoRA is enabled and --lora-adapter-path={adapter_path} was specified, "
-                    f"but adapter weights could not be loaded. "
-                    f"Training will start with freshly initialized adapter weights."
-                )
-
-    return (*result, native_optimizer_restored)
+    return result
 
 
 def save_checkpoint_with_lora(
