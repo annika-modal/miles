@@ -13,7 +13,7 @@ from miles.utils.lora.hf_lora_targets import (
     resolve_hf_lora_targets,
 )
 from miles.utils.lora.utils import is_lora_enabled, matches_lora_target, targets_expert_leaves
-from miles_plugins.lora import resolve_adapter_targets
+from miles_plugins.lora import resolve_adapter_targets, validate_native_lora_args
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,12 @@ def validate_lora_args(args):
             "MoE-expert LoRA layout: %s (--experts-shared-outer-loras).",
             "shared-outer" if args.experts_shared_outer_loras else "per-expert",
         )
+
+
+def validate_lora_backend_args(args):
+    """LoRA checks that read Megatron's resolved args (e.g. the expert TP size it defaults from TP)."""
+    if is_lora_enabled(args) and args.megatron_to_hf_mode == "raw":
+        validate_native_lora_args(args)
 
 
 def _resolve_lora_targets(args, hf_config):

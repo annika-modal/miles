@@ -279,11 +279,6 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if update_weights:
             is_lora = lora_rollout_enabled(args)
-            if is_lora and not args.colocate:
-                assert args.megatron_to_hf_mode == "bridge", (
-                    "LoRA weight sync over distributed engines requires "
-                    f"--megatron-to-hf-mode bridge (got {args.megatron_to_hf_mode!r})."
-                )
             self.weight_updater = WeightUpdater(
                 args,
                 self.model,

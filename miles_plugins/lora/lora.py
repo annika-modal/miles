@@ -25,7 +25,6 @@ def apply_native_lora(model, args):
     model_type, arch_spec = resolve_checkpoint_spec(args.hf_checkpoint)
     context = _resolve_attach_context(args, model.config, arch_spec)
     arch_spec.validate(context)
-    _assert_supported_run(args)
     mbridge_cross_check(model_type, context.layer_prefix)
 
     for parameter in model.parameters():
@@ -110,22 +109,6 @@ def _attach_attention(attention: nn.Module, hf_layer: str, arch_spec: LoRAArchSp
         "the built attention module does not match the registered architecture."
     )
     return attached
-
-
-def _assert_supported_run(args) -> None:
-    """Reject runtime interactions that have not been validated for native LoRA."""
-    assert not args.overlap_param_gather, (
-        "native LoRA does not support --overlap-param-gather: sibling-module adapter attachment has not "
-        "been validated against MCore's bucket prefetch ordering."
-    )
-    assert not args.moe_shared_expert_overlap, (
-        "native LoRA does not support --moe-shared-expert-overlap: the dispatcher owns the shared-expert "
-        "communication, so the adapter's gather/reduce no longer matches the module's parallel mode."
-    )
-    assert not args.overlap_grad_reduce, (
-        "native LoRA does not support --overlap-grad-reduce: replicated adapter gradients need a "
-        "tensor-parallel sum over the buffer MCore's in-flight data-parallel reduce-scatter writes."
-    )
 
 
 def _require_grad_on_first_activation(model) -> nn.Module | None:

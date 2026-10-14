@@ -1,5 +1,6 @@
 """Unit tests for the native-LoRA architecture specs and HF target contract — no GPU."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from miles.utils.lora.hf_lora_targets import resolve_hf_lora_targets
 from miles_plugins.lora.config import LoRAConfig
 from miles_plugins.lora.registry import MODEL_SPECS
 from miles_plugins.lora.registry import resolve_adapter_targets as _resolve_adapter_targets
+from miles_plugins.lora.registry import validate_native_lora_args
 from miles_plugins.lora.spec.attention import GQAAttentionSpec, MLAAttentionSpec
 from miles_plugins.lora.spec.base import AttachContext
 
@@ -206,3 +208,40 @@ class TestAttachWalk:
         attention = _gqa_attention()
         GQAAttentionSpec().attach(attention, "model.layers.0.self_attn.", self._context(("q_proj",)))
         assert [projection.hf for projection in attention.lora_qkv_adapter.projection_specs] == ["q_proj"]
+
+
+def _native_run_args(tmp_path, model_type, **overrides):
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}))
+    defaults = dict(
+        hf_checkpoint=str(tmp_path),
+        lora_rank=8,
+        lora_train_only=False,
+        colocate=True,
+        overlap_param_gather=False,
+        moe_shared_expert_overlap=False,
+        overlap_grad_reduce=False,
+        expert_tensor_parallel_size=1,
+    )
+    return SimpleNamespace(**(defaults | overrides))
+
+
+@pytest.mark.parametrize(
+    "override, message",
+    [
+        ({"colocate": False}, "colocated"),
+        ({"overlap_param_gather": True}, "overlap-param-gather"),
+        ({"moe_shared_expert_overlap": True}, "moe-shared-expert-overlap"),
+        ({"overlap_grad_reduce": True}, "overlap-grad-reduce"),
+        ({"expert_tensor_parallel_size": 2}, "expert-tensor-parallel-size"),
+    ],
+)
+def test_native_run_contract_rejects_unvalidated_configs(tmp_path, override, message):
+    with pytest.raises(AssertionError, match=message):
+        validate_native_lora_args(_native_run_args(tmp_path, "kimi_k3", **override))
+
+
+def test_native_run_contract_accepts_its_validated_configs(tmp_path):
+    validate_native_lora_args(_native_run_args(tmp_path, "kimi_k3"))
+    validate_native_lora_args(_native_run_args(tmp_path, "kimi_k3", colocate=False, lora_train_only=True))
+    # expert TP only matters for specs whose routed experts carry adapters
+    validate_native_lora_args(_native_run_args(tmp_path, "qwen3_moe", expert_tensor_parallel_size=2))

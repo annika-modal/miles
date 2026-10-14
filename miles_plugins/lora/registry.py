@@ -8,7 +8,7 @@ import os
 from dataclasses import dataclass
 
 from miles.utils.lora.hf_lora_targets import resolve_hf_lora_targets
-from miles.utils.lora.utils import matches_lora_target
+from miles.utils.lora.utils import lora_rollout_enabled, matches_lora_target
 from miles_plugins.lora.spec.attention import (
     GQAAttentionSpec,
     HybridGQAGDNAttentionSpec,
@@ -155,6 +155,30 @@ def resolve_adapter_targets(
         f"--target-modules {default_target_modules(hf_config)}) or use --megatron-to-hf-mode bridge."
     )
     return _expand_fused_families(hf_targets, spec.serving_fused_families())
+
+
+def validate_native_lora_args(args) -> None:
+    """Reject run configurations native LoRA has not been validated with; needs Megatron's resolved args."""
+    assert args.colocate or not lora_rollout_enabled(args), (
+        "native LoRA syncs adapters only to colocated engines; use --colocate, --lora-train-only, "
+        "or --megatron-to-hf-mode bridge"
+    )
+    assert not args.overlap_param_gather, (
+        "native LoRA does not support --overlap-param-gather: sibling-module adapter attachment has not "
+        "been validated against MCore's bucket prefetch ordering."
+    )
+    assert not args.moe_shared_expert_overlap, (
+        "native LoRA does not support --moe-shared-expert-overlap: the dispatcher owns the shared-expert "
+        "communication, so the adapter's gather/reduce no longer matches the module's parallel mode."
+    )
+    assert not args.overlap_grad_reduce, (
+        "native LoRA does not support --overlap-grad-reduce: replicated adapter gradients need a "
+        "tensor-parallel sum over the buffer MCore's in-flight data-parallel reduce-scatter writes."
+    )
+    _model_type, spec = resolve_checkpoint_spec(args.hf_checkpoint)
+    assert (
+        spec.experts is None or args.expert_tensor_parallel_size == 1
+    ), f"native {spec.name} expert LoRA assumes --expert-tensor-parallel-size 1"
 
 
 def _check_fixed_targets(spec: LoRAArchSpec, hf_config: dict, hf_targets: list[str]) -> None:

@@ -30,7 +30,6 @@ class GroupedExpertsSpec:
         if not hasattr(mlp, "experts"):
             return 0
         config = mlp.config
-        assert (getattr(config, "expert_tensor_parallel_size", 1) or 1) == 1, "native expert LoRA assumes ETP=1"
         experts = mlp.experts
         prefix = hf_prefix + self.block
         common = dict(
