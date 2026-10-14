@@ -14,7 +14,6 @@ from miles_plugins.lora.hf_adapter import export_lora_hf_named, load_lora_adapte
 from miles_plugins.lora.merge import merge_lora_into_weights
 from miles_plugins.lora.modules.moe import _grouped_linear
 from miles_plugins.lora.registry import MODEL_SPECS, resolve_adapter_targets
-from miles_plugins.lora.sglang_adapter import export_lora_sglang_named
 from miles_plugins.lora.spec.base import AttachContext
 from tests.fast.miles_plugins.lora.naming_stub import named
 
@@ -179,12 +178,6 @@ def test_export_names_and_shapes_match_sglang(include_fc2):
     if include_fc2:
         assert exported[f"{experts}w2.lora_A.weight"].shape == (3, RANK, 5)
         assert exported[f"{experts}w2.lora_B.weight"].shape == (1, LATENT, RANK)
-
-
-def test_serving_sync_exports_exactly_the_checkpoint_tensors():
-    """Weight sync goes through the SGLang exporter; Kimi K3 has no fused serving siblings to zero-fill."""
-    model = _model()
-    assert dict(export_lora_sglang_named([model])).keys() == dict(export_lora_hf_named([model])).keys()
 
 
 def test_hf_import_round_trips_the_export(tmp_path):

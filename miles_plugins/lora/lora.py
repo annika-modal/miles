@@ -12,7 +12,6 @@ from miles.utils.hf_utils.config import load_hf_config
 from miles_plugins.lora.hf_adapter import export_lora_hf_named, load_lora_adapter_hf
 from miles_plugins.lora.naming import ConverterNaming
 from miles_plugins.lora.registry import resolve_checkpoint_spec
-from miles_plugins.lora.sglang_adapter import export_lora_sglang_named
 from miles_plugins.lora.spec.base import AttachContext, LoRAArchSpec
 
 logger = logging.getLogger(__name__)
@@ -115,7 +114,6 @@ def _require_grad_on_first_activation(model) -> nn.Module | None:
 __all__ = [
     "apply_native_lora",
     "export_lora_hf_named",
-    "export_lora_sglang_named",
     "load_lora_adapter_hf",
     "wrap_model_provider_with_lora",
 ]

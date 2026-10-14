@@ -20,7 +20,7 @@ from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.types import ParamInfo
-from miles_plugins.lora import export_lora_sglang_named
+from miles_plugins.lora import export_lora_hf_named
 
 
 @dataclass(frozen=True)
@@ -127,7 +127,7 @@ class HfWeightIteratorDirect(MegatronHfWeightIteratorBase):
 
     def _export_pp_local_lora(self, adapter):
         assert adapter is None, "multi-LoRA export requires --megatron-to-hf-mode bridge"
-        return export_lora_sglang_named(self.model)
+        return export_lora_hf_named(self.model)
 
     def _convert_to_hf_param_units(self, named_params: Sequence[tuple[str, torch.Tensor]]):
         for name, param in named_params:
