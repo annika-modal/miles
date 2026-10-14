@@ -24,20 +24,29 @@ class _Cell:
 
 
 def make_checksum_controller(
-    *, args: Namespace, snapshot: dict[str, str], check_weights: Callable[..., Awaitable[Any]],
+    *,
+    args: Namespace,
+    snapshot: dict[str, str],
+    check_weights: Callable[..., Awaitable[Any]],
     model_id: str | None = None,
 ) -> InferenceController:
     controller = InferenceController(
         make_args(colocate=False, update_weight_engine_request_timeout=args.update_weight_engine_request_timeout),
-        engine_provider=None, router_providers=[],
+        engine_provider=None,
+        router_providers=[],
     )
     cells = {cell_id: _Cell(workers_hash) for cell_id, workers_hash in snapshot.items()}
     controller.servers = {
-        model_id or "default": SimpleNamespace(
-            update_weights=True, all_server_cells=cells, normal_server_cells=cells,
+        model_id
+        or "default": SimpleNamespace(
+            update_weights=True,
+            all_server_cells=cells,
+            normal_server_cells=cells,
             health_checker_activeness=ActivenessTracker(active=True),
-            api_clients=[object() for _ in cells], engine_gpu_counts=[1 for _ in cells],
-            engine_gpu_offsets=list(range(len(cells))), engine_cell_ids=list(cells),
+            api_clients=[object() for _ in cells],
+            engine_gpu_counts=[1 for _ in cells],
+            engine_gpu_offsets=list(range(len(cells))),
+            engine_cell_ids=list(cells),
             check_weights=check_weights,
         )
     }

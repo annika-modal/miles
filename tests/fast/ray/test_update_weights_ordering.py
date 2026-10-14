@@ -255,17 +255,27 @@ class TestTheScriptLogsTheChecksumsTheEnginesNowServe:
             check_weights=check_weights,
             model_id=trainer_model_id,
         )
-        actor = SimpleNamespace(update_weights=AsyncMock(return_value=WeightUpdateOutput(
-            weight_version=11, failed_cell_ids=(), debug_trainer_load_state_timestamp=1.0,
-            debug_weight_update_id="update-11",
-        )))
+        actor = SimpleNamespace(
+            update_weights=AsyncMock(
+                return_value=WeightUpdateOutput(
+                    weight_version=11,
+                    failed_cell_ids=(),
+                    debug_trainer_load_state_timestamp=1.0,
+                    debug_weight_update_id="update-11",
+                )
+            )
+        )
         event_logger = MagicMock()
         with patch("miles.ray.placement_group.is_event_logger_initialized", return_value=initialized), patch(
             "miles.ray.placement_group.get_event_logger", return_value=event_logger
         ):
             await update_weights(
-                args, actor, SimpleNamespace(set_weight_version=AsyncMock()), controller,
-                rollout_id=0, trainer_model_id=trainer_model_id,
+                args,
+                actor,
+                SimpleNamespace(set_weight_version=AsyncMock()),
+                controller,
+                rollout_id=0,
+                trainer_model_id=trainer_model_id,
             )
         return SimpleNamespace(check_weights=check_weights), event_logger
 
@@ -301,9 +311,7 @@ class TestTheScriptLogsTheChecksumsTheEnginesNowServe:
 
         inference_controller, event_logger = await self._log(_orchestration_args(), response=response)
 
-        inference_controller.check_weights.assert_awaited_once_with(
-            action="checksum", cell_ids=["cell-0", "cell-1"]
-        )
+        inference_controller.check_weights.assert_awaited_once_with(action="checksum", cell_ids=["cell-0", "cell-1"])
         event_logger.log.assert_called_once()
         assert event_logger.log.call_args.args[1] == dict(
             rollout_id=0,
@@ -329,9 +337,7 @@ class TestTheScriptLogsTheChecksumsTheEnginesNowServe:
             _orchestration_args(), response=response, trainer_model_id="solver"
         )
 
-        inference_controller.check_weights.assert_awaited_once_with(
-            action="checksum", cell_ids=["cell-0"]
-        )
+        inference_controller.check_weights.assert_awaited_once_with(action="checksum", cell_ids=["cell-0"])
         assert event_logger.log.call_args.args[1] == dict(
             rollout_id=0,
             trainer_model_id="solver",
@@ -368,12 +374,22 @@ class TestTheChecksumRecordKeepsOnlyThisPublication:
 
         args = _orchestration_args(**arg_overrides)
         controller = make_checksum_controller(args=args, snapshot=snapshot, check_weights=check_weights)
-        actor = SimpleNamespace(update_weights=AsyncMock(return_value=WeightUpdateOutput(
-            weight_version=weight_version, failed_cell_ids=failed,
-            debug_trainer_load_state_timestamp=1.0, debug_weight_update_id="update-11",
-        )))
+        actor = SimpleNamespace(
+            update_weights=AsyncMock(
+                return_value=WeightUpdateOutput(
+                    weight_version=weight_version,
+                    failed_cell_ids=failed,
+                    debug_trainer_load_state_timestamp=1.0,
+                    debug_weight_update_id="update-11",
+                )
+            )
+        )
         await update_weights(
-            args, actor, SimpleNamespace(set_weight_version=AsyncMock()), controller, rollout_id=0,
+            args,
+            actor,
+            SimpleNamespace(set_weight_version=AsyncMock()),
+            controller,
+            rollout_id=0,
         )
         assert not controller.context_lock.locked
 
