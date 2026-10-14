@@ -427,11 +427,24 @@ def attach_delta_forward(
     """Add ``scale * delta(x, module, *host_args)`` to a host linear while preserving ``(out, bias)``.
 
     Extra host-forward positionals (e.g. grouped GEMM's ``tokens_per_expert``)
-    are forwarded to the delta, which may ignore them.
+    are forwarded to the delta, which may ignore them. A TE ``LayerNormLinear`` host
+    feeds the delta the norm output it computed itself.
     """
     original = module.forward
 
-    if host_returns_bias:
+    if hasattr(module, "return_layernorm_output"):
+        # the gathered variant drops the gradient flowing back through the returned norm output
+        module.return_layernorm_output = True
+        module.return_layernorm_output_gathered = False
+
+        def forward(x, *args, **kwargs):
+            if module.te_return_bias:
+                out, bias, normed = original(x, *args, **kwargs)
+            else:
+                (out, normed), bias = original(x, *args, **kwargs)
+            return torch.add(out, delta(normed, module, *args), alpha=scale), bias
+
+    elif host_returns_bias:
 
         def forward(x, *args, **kwargs):
             out, bias = original(x, *args, **kwargs)

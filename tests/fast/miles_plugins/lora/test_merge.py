@@ -19,16 +19,23 @@ HIDDEN = 8
 
 
 class _Linear(nn.Module):
+    """A plain MCore linear, or with ``fused_norm`` a TE LayerNormLinear and its return contract."""
+
     def __init__(self, out_features, in_features, *, fused_norm=False):
         super().__init__()
         self.weight = nn.Parameter(torch.randn(out_features, in_features))
         if fused_norm:
             self.layer_norm_weight = nn.Parameter(torch.rand(in_features) + 0.5)
+            self.return_layernorm_output = False
+            self.return_layernorm_output_gathered = False
+            self.te_return_bias = False
 
     def forward(self, x):
-        if hasattr(self, "layer_norm_weight"):
-            x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-5) * self.layer_norm_weight
-        return x @ self.weight.t(), None
+        if not hasattr(self, "layer_norm_weight"):
+            return x @ self.weight.t(), None
+        normed = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-5) * self.layer_norm_weight
+        out = normed @ self.weight.t()
+        return ((out, normed) if self.return_layernorm_output else out), None
 
 
 class _GroupedLinear(nn.Module):
@@ -81,6 +88,8 @@ def _assert_merge_matches_forward(module, names_and_hosts, *host_args):
         expected = host(x, *host_args)[0]
         base_forward = host.forward
         del host.forward
+        if hasattr(host, "return_layernorm_output"):
+            host.return_layernorm_output = False
         with torch.no_grad():
             for weight_name in [n for n, _ in host.named_parameters() if n.startswith("weight")]:
                 getattr(host, weight_name).copy_(merged[f"{name}.{weight_name}"])

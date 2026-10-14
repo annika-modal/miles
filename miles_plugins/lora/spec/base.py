@@ -74,10 +74,6 @@ class AttachContext:
         return self.lora.a_init_method
 
     @property
-    def eps(self) -> float:
-        return self.transformer_config.layernorm_epsilon
-
-    @property
     def hidden(self) -> int:
         return self.transformer_config.hidden_size
 
@@ -85,10 +81,6 @@ class AttachContext:
     def sequence_parallel(self) -> bool:
         """Whether the adapted hosts see sequence-parallel shards; a full-sequence block gathers them first."""
         return not self.full_sequence and bool(self.transformer_config.sequence_parallel)
-
-    @property
-    def zero_centered_gamma(self) -> bool:
-        return bool(getattr(self.transformer_config, "layernorm_zero_centered_gamma", False))
 
     @property
     def output_gate(self) -> bool:

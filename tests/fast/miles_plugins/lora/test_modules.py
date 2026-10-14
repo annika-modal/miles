@@ -6,11 +6,19 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from miles.utils.lora.arguments import add_lora_arguments
-from miles_plugins.lora.distributed import rmsnorm
 from miles_plugins.lora.lora import _require_grad_on_first_activation
-from miles_plugins.lora.modules.linear import build_qkv_permutation, new_lora_parameter
+from miles_plugins.lora.config import LoRAConfig
+from miles_plugins.lora.modules.linear import (
+    LoRALinear,
+    attach_adapter_forward,
+    build_qkv_permutation,
+    new_lora_parameter,
+)
+from miles_plugins.lora.spec.base import AttachContext, ProjectionSpec, ShardLayout
 
 
 class TestBuildQkvPerm:
@@ -52,24 +60,6 @@ class TestBuildQkvPerm:
         plain = torch.tensor([[10.0, 40.0, 11.0, 41.0, 12.0, 42.0, 13.0, 43.0, 20.0, 21.0, 30.0, 31.0]])
         out = plain.index_select(-1, perm)
         assert out.tolist() == [[10.0, 11.0, 40.0, 41.0, 20.0, 30.0, 12.0, 13.0, 42.0, 43.0, 21.0, 31.0]]
-
-
-class TestRmsNorm:
-    def test_plain_gamma_scales_by_the_stored_weight(self):
-        x = torch.tensor([[3.0, 4.0]])
-        gamma = torch.tensor([2.0, 2.0])
-        got = rmsnorm(x, gamma, eps=0.0)
-        assert torch.allclose(got, torch.tensor([[3.0, 4.0]]) / 3.5355339 * 2.0, atol=1e-5)
-
-    def test_zero_centered_gamma_adds_the_one_back(self):
-        """--apply-layernorm-1p stores gamma - 1; the branch must see the same input
-        the base GEMM does, or the adapter is fed a differently scaled activation."""
-        x = torch.tensor([[3.0, 4.0]])
-        stored = torch.tensor([1.0, 1.0])
-        assert torch.allclose(
-            rmsnorm(x, stored, eps=0.0, zero_centered_gamma=True),
-            rmsnorm(x, stored + 1.0, eps=0.0),
-        )
 
 
 class TestFirstActivationGrad:
@@ -129,3 +119,57 @@ class TestLoRAInitMethod:
         torch.testing.assert_close(normal.std().item(), 0.2, atol=5e-3, rtol=0)
         with pytest.raises(KeyError):
             draw("orthogonal")
+
+
+class _TELayerNormLinear(nn.Module):
+    """TE LayerNormLinear's contract: a LayerNorm with bias here, so a recomputed RMSNorm cannot match."""
+
+    def __init__(self, out_features, in_features):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features, in_features))
+        self.layer_norm_weight = nn.Parameter(torch.rand(in_features) + 0.5)
+        self.layer_norm_bias = nn.Parameter(torch.randn(in_features))
+        self.return_layernorm_output = False
+        self.return_layernorm_output_gathered = False
+        self.te_return_bias = False
+
+    def normed(self, x):
+        return F.layer_norm(x, x.shape[-1:], self.layer_norm_weight, self.layer_norm_bias)
+
+    def forward(self, x):
+        normed = self.normed(x)
+        out = normed @ self.weight.t()
+        return ((out, normed) if self.return_layernorm_output else out), None
+
+
+def test_a_column_adapter_reads_its_fused_norm_hosts_own_norm_output():
+    """The adapter must see exactly the activation the base GEMM sees, whatever the norm is."""
+    host = _TELayerNormLinear(4, 6)
+    context = AttachContext(
+        lora=LoRAConfig(rank=2, alpha=2, dropout=0.0, target_modules=None),
+        transformer_config=SimpleNamespace(hidden_size=6, sequence_parallel=False),
+        tp_size=1,
+        tp_rank=0,
+        layer_prefix="model.layers.",
+        shared_expert="mlp.shared_experts.",
+    )
+    adapter = LoRALinear(
+        hf_prefix="model.layers.0.mlp.",
+        projection=ProjectionSpec("up_proj", "up", ShardLayout.COLUMN),
+        reference=host.weight,
+        context=context,
+        in_features=6,
+        out_features=4,
+    )
+    with torch.no_grad():
+        adapter.up_A.normal_()
+        adapter.up_B.normal_()
+    attach_adapter_forward(host, adapter, context.scale)
+    x = torch.randn(3, 6)
+
+    out, bias = host(x)
+
+    assert bias is None
+    expected = host.normed(x) @ (host.weight + context.scale * adapter.up_B @ adapter.up_A).t()
+    torch.testing.assert_close(out, expected)
+    assert host.return_layernorm_output and not host.return_layernorm_output_gathered

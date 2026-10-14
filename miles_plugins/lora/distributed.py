@@ -12,19 +12,6 @@ import torch.nn.functional as F
 from miles_plugins.lora.spec.base import AttachContext
 
 
-def rmsnorm(
-    x: torch.Tensor,
-    gamma: torch.Tensor,
-    eps: float,
-    zero_centered_gamma: bool = False,
-) -> torch.Tensor:
-    """Recompute RMSNorm fused into a TE column-parallel linear."""
-    xf = x.float()
-    normed = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
-    weight = gamma.float() + 1.0 if zero_centered_gamma else gamma.float()
-    return (normed * weight).to(x.dtype)
-
-
 def apply_lora_dropout(x: torch.Tensor, context: AttachContext, training: bool) -> torch.Tensor:
     if context.dropout and training:
         return F.dropout(x, p=context.dropout, training=True)
@@ -32,14 +19,7 @@ def apply_lora_dropout(x: torch.Tensor, context: AttachContext, training: bool) 
 
 
 def branch_input(x: torch.Tensor, module: nn.Module, context: AttachContext) -> torch.Tensor:
-    """Return the input expected by a column-parallel LoRA branch.
-
-    This mirrors the wrapped MCore/TE module's fused RMSNorm and TP/SP input
-    mapping without moving those architecture details into the attachment spec.
-    """
-    gamma = getattr(module, "layer_norm_weight", None)
-    if gamma is not None:
-        x = rmsnorm(x, gamma, context.eps, context.zero_centered_gamma)
+    """Map a column-parallel LoRA branch's input into the TP region, as the wrapped module does."""
     if context.sequence_parallel:
         from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 
