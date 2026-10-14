@@ -366,7 +366,6 @@ class LoRASplitQKV(LoRASplitAdapter):
 class LoRASplitFC1(LoRASplitAdapter):
     """Independent gate/up adapters whose delta is packed into one fused FC1 output."""
 
-
     def __init__(
         self,
         *,
