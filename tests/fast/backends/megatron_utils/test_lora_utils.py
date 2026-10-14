@@ -8,11 +8,12 @@ import torch
 
 import miles.backends.megatron_utils.lora.utils as lora_utils
 from miles.backends.megatron_utils.lora.utils import (
-    _is_adapter_param_name,
+    adapter_named_parameters,
     is_lora_enabled,
     save_lora_checkpoint,
 )
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, is_lora_weight_name
+from miles_plugins.lora.modules.linear import NativeLoRAAdapter
 
 # ---------------------------------------------------------------------------
 # is_lora_enabled
@@ -42,7 +43,7 @@ class TestIsLoraEnabled:
 
 
 # ---------------------------------------------------------------------------
-# is_lora_weight_name / _is_adapter_param_name
+# is_lora_weight_name / adapter_named_parameters
 # ---------------------------------------------------------------------------
 
 
@@ -72,28 +73,47 @@ class TestIsLoraWeightName:
         assert is_lora_weight_name(name) is False
 
 
-class TestIsAdapterParamName:
-    @pytest.mark.parametrize(
-        "name",
-        [
-            "module.decoder.layers.0.self_attention.linear_qkv.lora_A.weight",
-            "module.decoder.layers.0.self_attention.linear_qkv.adapter.linear_in.weight",
-            "module.decoder.layers.0.self_attention.linear_qkv.adapter.linear_out.weight",
-        ],
-    )
-    def test_positive(self, name):
-        assert _is_adapter_param_name(name) is True
+class _NativeAdapter(NativeLoRAAdapter):
+    def __init__(self):
+        super().__init__("model.layers.0.self_attn.q_proj.", (), tp_rank=0)
+        self.lora_A = torch.nn.Parameter(torch.zeros(1, 2))
+        self.lora_B = torch.nn.Parameter(torch.zeros(2, 1))
 
-    @pytest.mark.parametrize(
-        "name",
-        [
-            "module.decoder.layers.0.self_attention.linear_qkv.weight",
-            "module.decoder.layers.0.mlp.linear_fc1.weight",
-            "module.embedding.word_embeddings.weight",
-        ],
-    )
-    def test_negative(self, name):
-        assert _is_adapter_param_name(name) is False
+    def export_plan(self, gather):
+        return []
+
+
+class TestAdapterNamedParameters:
+    """Adapter parameters are whatever the adapter modules own; their names are irrelevant."""
+
+    def test_native_adapter_parameters_are_found_whatever_they_are_called(self):
+        model = torch.nn.Module()
+        model.base = torch.nn.Linear(2, 2)
+        model.anything = _NativeAdapter()
+        model.anything.register_parameter("magnitude", torch.nn.Parameter(torch.ones(2)))
+
+        assert sorted(adapter_named_parameters([model])) == [
+            "anything.lora_A",
+            "anything.lora_B",
+            "anything.magnitude",
+        ]
+
+    def test_bridge_wrappers_contribute_everything_but_the_wrapped_base(self):
+        from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
+
+        adapter = torch.nn.Module()
+        adapter.linear_in = torch.nn.Linear(2, 1, bias=False)
+        model = torch.nn.Module()
+        model.linear_qkv = AdapterWrapper(torch.nn.Linear(2, 2), adapter)
+
+        assert sorted(adapter_named_parameters([model])) == ["linear_qkv.adapter.linear_in.weight"]
+
+    def test_base_parameters_named_like_adapters_are_not_adapters(self):
+        model = torch.nn.Module()
+        model.mm_adapter = torch.nn.Linear(2, 2)
+        model.register_parameter("lora_scale", torch.nn.Parameter(torch.ones(1)))
+
+        assert adapter_named_parameters([model]) == {}
 
 
 # ---------------------------------------------------------------------------
@@ -109,8 +129,7 @@ class _AdapterModel(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.base = torch.nn.Linear(2, 2)
-        self.lora_A = torch.nn.Parameter(torch.zeros(1, 2))
-        self.lora_B = torch.nn.Parameter(torch.zeros(2, 1))
+        self.adapter = _NativeAdapter()
 
 
 def _single_rank(monkeypatch):
@@ -125,8 +144,7 @@ class TestSaveLoraCheckpointTrainingState:
     def _save(self, tmp_path, *, no_save_optim, scheduler=None):
         publisher = SimpleNamespace(write_adapter=lambda *_: None)
 
-        adapter = torch.nn.Parameter(torch.ones(2))
-        model = [SimpleNamespace(named_parameters=lambda: [("layers.0.self_attention.lora_A.weight", adapter)])]
+        model = [_AdapterModel()]
         args = Namespace(megatron_to_hf_mode="bridge", no_save_optim=no_save_optim)
         optimizer = SimpleNamespace(state_dict=lambda: {"step": 7})
         save_lora_checkpoint(
@@ -219,7 +237,10 @@ class TestRestoreLoraAdapter:
 
     @staticmethod
     def _write_native(tmp_path, **training_state):
-        torch.save({"lora_A": torch.ones(1, 2), "lora_B": torch.ones(2, 1)}, tmp_path / "adapter_megatron_rank0.pt")
+        torch.save(
+            {"adapter.lora_A": torch.ones(1, 2), "adapter.lora_B": torch.ones(2, 1)},
+            tmp_path / "adapter_megatron_rank0.pt",
+        )
         if training_state:
             state = {"iteration": 5, "optimizer": {"step": 7}, "opt_param_scheduler": {"lr": 0.5}} | training_state
             torch.save(state, tmp_path / "training_state_rank0.pt")
@@ -310,15 +331,17 @@ class TestRestoreLoraAdapter:
     def test_a_shard_that_does_not_match_the_adapter_fails(self, tmp_path, monkeypatch):
         """A silently partial load resumes training on a half-initialized adapter."""
         _single_rank(monkeypatch)
-        torch.save({"lora_A": torch.ones(1, 2), "stale_lora_C": torch.ones(1)}, tmp_path / "adapter_megatron_rank0.pt")
+        torch.save(
+            {"adapter.lora_A": torch.ones(1, 2), "stale_lora_C": torch.ones(1)}, tmp_path / "adapter_megatron_rank0.pt"
+        )
 
-        with pytest.raises(RuntimeError, match=r"missing=\['lora_B'\], unexpected=\['stale_lora_C'\]"):
+        with pytest.raises(RuntimeError, match=r"missing=\['adapter.lora_B'\], unexpected=\['stale_lora_C'\]"):
             self._restore(tmp_path, [], no_load_optim=True)
 
     def test_shards_saved_under_another_layout_fail(self, tmp_path, monkeypatch):
         """Falling through to fresh adapter weights would hide a resharding mistake."""
         _single_rank(monkeypatch)
-        torch.save({"lora_A": torch.ones(1, 2)}, tmp_path / "adapter_megatron_rank1.pt")
+        torch.save({"adapter.lora_A": torch.ones(1, 2)}, tmp_path / "adapter_megatron_rank1.pt")
 
         with pytest.raises(AssertionError, match="none for global rank 0"):
             self._restore(tmp_path, [], no_load_optim=True)

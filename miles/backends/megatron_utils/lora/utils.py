@@ -14,6 +14,7 @@ from miles.backends.training_utils.checkpoint.io import write_checkpoint_dir
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.weight_update.snapshot_publisher import SnapshotPublisher
 from miles_plugins.lora import load_lora_adapter_hf
+from miles_plugins.lora.modules.linear import NativeLoRAAdapter
 from miles.utils.lora.utils import (  # noqa: F401  (re-exported)
     build_lora_config,
     is_lora_enabled,
@@ -72,18 +73,28 @@ def reduce_marked_lora_grads(model: Sequence[torch.nn.Module]) -> None:
 
 def is_lora_model(model: Sequence[torch.nn.Module]) -> bool:
     """Check if model has LoRA layers applied."""
+    return bool(adapter_named_parameters(model))
+
+
+def adapter_named_parameters(model: Sequence[torch.nn.Module]) -> dict[str, torch.nn.Parameter]:
+    """Every adapter parameter, found by the module that owns it: a native adapter, or what a Bridge
+    ``AdapterWrapper`` holds besides the base module it wraps."""
+    from megatron.bridge.peft.adapter_wrapper import AdapterWrapper
+
+    adapter_ids: set[int] = set()
     for model_chunk in model:
-        if hasattr(model_chunk.module, "peft_config"):
-            return True
-        for name, _ in model_chunk.named_parameters():
-            if "lora_" in name or "adapter" in name:
-                return True
-    return False
-
-
-def _is_adapter_param_name(name: str) -> bool:
-    """Check if a parameter name belongs to a LoRA adapter (Megatron internal naming)."""
-    return "lora_" in name or (".adapter." in name and ("linear_in" in name or "linear_out" in name))
+        for module in model_chunk.modules():
+            if isinstance(module, NativeLoRAAdapter):
+                adapter_ids.update(id(param) for param in module.parameters())
+            elif isinstance(module, AdapterWrapper):
+                base_ids = {id(param) for param in module.to_wrap.parameters()}
+                adapter_ids.update(id(param) for param in module.parameters() if id(param) not in base_ids)
+    return {
+        name: param
+        for model_chunk in model
+        for name, param in model_chunk.named_parameters()
+        if id(param) in adapter_ids
+    }
 
 
 _param_grad_buffer_patched = False
@@ -182,12 +193,7 @@ def save_lora_checkpoint(
     global_rank = dist.get_rank() if dist.is_initialized() else 0
 
     def write_shards(checkpoint_dir: Path):
-        adapter_state = {
-            name: param.detach().cpu()
-            for model_chunk in model
-            for name, param in model_chunk.named_parameters()
-            if _is_adapter_param_name(name)
-        }
+        adapter_state = {name: param.detach().cpu() for name, param in adapter_named_parameters(model).items()}
         training_state = None
         if optimizer is not None:
             save_optimizer = not getattr(args, "no_save_optim", False)
@@ -295,12 +301,7 @@ def _native_adapter_shard(adapter_dir: Path) -> Path | None:
 
 def _load_native_adapter_shard(model: Sequence[torch.nn.Module], shard: Path) -> None:
     state_dict = torch.load(shard, map_location="cpu", weights_only=True)
-    adapter_params = {
-        name: param
-        for model_chunk in model
-        for name, param in model_chunk.named_parameters()
-        if _is_adapter_param_name(name)
-    }
+    adapter_params = adapter_named_parameters(model)
     missing = adapter_params.keys() - state_dict.keys()
     unexpected = state_dict.keys() - adapter_params.keys()
     if missing or unexpected:
