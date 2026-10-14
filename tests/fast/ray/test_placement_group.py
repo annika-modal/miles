@@ -371,7 +371,9 @@ class TestUpdateWeights:
 
         actor_model, rollout_executor = self._fakes(weight_version=7)
 
-        inference_controller = MagicMock(start_update_weights=AsyncMock(), end_update_weights=AsyncMock(return_value=[]))
+        inference_controller = MagicMock(
+            start_update_weights=AsyncMock(), end_update_weights=AsyncMock(return_value=[])
+        )
 
         await update_weights(self._args(), actor_model, rollout_executor, inference_controller, rollout_id=3)
 
@@ -384,7 +386,9 @@ class TestUpdateWeights:
         from miles.ray.placement_group import update_weights
 
         actor_model, rollout_executor = self._fakes(weight_version=7)
-        inference_controller = MagicMock(start_update_weights=AsyncMock(), end_update_weights=AsyncMock(return_value=[]))
+        inference_controller = MagicMock(
+            start_update_weights=AsyncMock(), end_update_weights=AsyncMock(return_value=[])
+        )
         hook = AsyncMock(side_effect=AssertionError("fault hook failed"))
         monkeypatch.setattr(placement_group_module, "reach_fault_hook_async", hook)
 
@@ -407,7 +411,9 @@ class TestUpdateWeights:
 
         actor_model, rollout_executor = self._fakes(weight_version=7)
 
-        inference_controller = MagicMock(start_update_weights=AsyncMock(), end_update_weights=AsyncMock(return_value=[]))
+        inference_controller = MagicMock(
+            start_update_weights=AsyncMock(), end_update_weights=AsyncMock(return_value=[])
+        )
 
         await update_weights(
             self._args(), actor_model, rollout_executor, inference_controller, rollout_id=3, trainer_model_id="alpha"
@@ -515,7 +521,9 @@ class TestUpdateWeights:
 
         actor_model, rollout_executor = self._fakes(weight_version=None)
 
-        inference_controller = MagicMock(start_update_weights=AsyncMock(), end_update_weights=AsyncMock(return_value=[]))
+        inference_controller = MagicMock(
+            start_update_weights=AsyncMock(), end_update_weights=AsyncMock(return_value=[])
+        )
 
         await update_weights(self._args(), actor_model, rollout_executor, inference_controller)
 
@@ -528,7 +536,9 @@ class TestUpdateWeights:
         actor_model, rollout_executor = self._fakes(weight_version=None)
         actor_model.update_weights = AsyncMock(side_effect=RuntimeError("weight sync failed"))
         inference_controller = MagicMock(
-            start_update_weights=AsyncMock(), abort_update_weights=AsyncMock(), end_update_weights=AsyncMock(return_value=[])
+            start_update_weights=AsyncMock(),
+            abort_update_weights=AsyncMock(),
+            end_update_weights=AsyncMock(return_value=[]),
         )
 
         with pytest.raises(RuntimeError, match="weight sync failed"):
