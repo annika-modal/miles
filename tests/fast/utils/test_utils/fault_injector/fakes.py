@@ -22,10 +22,12 @@ class _CellOperations:
         self.stopped: list[str] = []
         self.started: list[str] = []
         self.entered: list[str] = []
+        self.loops: list[asyncio.AbstractEventLoop] = []
         self.reject_stop = reject_stop
         self.stop_gate = stop_gate
 
     async def suspend(self, *, cell_id: str) -> None:
+        self.loops.append(asyncio.get_running_loop())
         self.entered.append(cell_id)
         if self.stop_gate is not None:
             await self.stop_gate.wait()
