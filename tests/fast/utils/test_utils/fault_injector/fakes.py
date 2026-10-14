@@ -142,7 +142,7 @@ def _arm_marker_hook(
 
 
 async def _configure_marker_hook(hooks: _FaultHookController, operations: _MarkerOperations) -> None:
-    hooks.configure(resources=FaultHookResources(cell_operations=operations))
+    hooks.configure(resources=FaultHookResources(cell_operations=operations, owner_loop=asyncio.get_running_loop()))
 
 
 class _ApiServer:
