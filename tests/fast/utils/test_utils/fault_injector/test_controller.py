@@ -778,9 +778,12 @@ class TestSynchronousCellDispatch:
         """A synchronous caller on the owner loop must fail before waiting on itself."""
         operations = _CellOperations()
         hooks = _FaultHookController()
-        hooks.configure(resources=FaultHookResources(
-            cell_operations=operations, owner_loop=asyncio.get_running_loop(),
-        ))
+        hooks.configure(
+            resources=FaultHookResources(
+                cell_operations=operations,
+                owner_loop=asyncio.get_running_loop(),
+            )
+        )
 
         with pytest.raises(AssertionError, match="Use asynchronous fault hooks"):
             _set(hooks, _stop(hook_name=None))
