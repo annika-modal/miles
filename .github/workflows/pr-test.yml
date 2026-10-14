@@ -282,24 +282,31 @@ jobs:
     secrets: inherit
 
   stage-c-4-gpu-h200:
-    # DNM (R1): the Mooncake probe once per runner, only on runners carrying the `aliyun` label.
-    # The probe changes no image, so the dev image is what resolve-ci-image would pick; depending on
-    # it would tie the probe to docker-build, which this DNM's stage-a-cpu lock-test failure skips.
+    # DNM (M4): the enabled 4-GPU H200 DeepEP tests on aliyun-tagged runners, with `_run-ci.yml`'s
+    # NVSHMEM_HCA_LIST step removed, so NVSHMEM brings up its RDMA transports in the job container.
+    # The dev image is what resolve-ci-image would pick; the DNM's stage-a-cpu lock-test failure skips docker-build.
     needs: [resolve-ci-policy]
     if: always() && !cancelled() && needs.resolve-ci-policy.result == 'success'
     strategy:
       fail-fast: false
       matrix:
-        runner: [aliyun-2-4gpu-0, aliyun-2-4gpu-1, aliyun-1-4gpu-0, aliyun-1-2gpu-0, aliyun-1-2gpu-1]
+        test_file:
+          - tests/e2e/megatron/test_glm47_flash/test_nospec_nor3_fp8_deepep_sgl_dpattn1x4_meg_tp2cp1_bshd.py
+          - tests/e2e/megatron/test_glm47_flash/test_nospec_r3_bf16_deepep_sgl_dpattn2x2_meg_tp2cp2_bshd.py
+          - tests/e2e/megatron/test_qwen3_30B_A3B/test_deepep_fp8.py
+          - tests/e2e/megatron/test_qwen3_30B_A3B/test_deepep_fp8_bridge.py
+          - tests/e2e/megatron/test_qwen3_30B_A3B/test_r3_deepep.py
+          - tests/e2e/megatron/test_qwen3_5_35B_A3B/test_nospec_nor3_bf16_deepep_sgl_dpattn2x2_meg_tp1cp2.py
+          - tests/e2e/megatron/test_qwen3_5_35B_A3B/test_spec_mtptrain_r3_fp8_deepep_sgl_dpattn1x4_meg_tp2cp1.py
     uses: ./.github/workflows/_run-ci.yml
     with:
-      runs_on: ${{ format('["{0}", "aliyun"]', matrix.runner) }}
-      timeout_minutes: 30
+      runs_on: '["h200", "4gpu", "aliyun"]'
+      timeout_minutes: 60
       container_image: radixark/miles:dev
       ref: ${{ inputs.ref || '' }}
-      # One file, like /rerun-test: the plan job only understands run_suite.py commands.
+      # One file per job, like /rerun-test (timeout = the largest file's max(1800, 1.25 * est_time)).
       plan_already_resolved: true
-      execute_command: timeout --signal=TERM --kill-after=30s 900s python3 tests/fast-gpu/test_mooncake_p2p_transport.py
+      execute_command: timeout --signal=TERM --kill-after=30s 2750s python3 ${{ matrix.test_file }}
     secrets: inherit
 
   stage-c-2-gpu-h200:
