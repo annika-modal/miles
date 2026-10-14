@@ -150,8 +150,7 @@ def test_a_column_adapter_reads_its_fused_norm_hosts_own_norm_output():
         transformer_config=SimpleNamespace(hidden_size=6, sequence_parallel=False),
         tp_size=1,
         tp_rank=0,
-        layer_prefix="model.layers.",
-        shared_expert="mlp.shared_experts.",
+        naming=None,
     )
     adapter = LoRALinear(
         hf_prefix="model.layers.0.mlp.",

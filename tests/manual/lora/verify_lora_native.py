@@ -162,6 +162,14 @@ class Args:
         "down_proj",
     ]
     hf_checkpoint = None
+    model_name = None
+    # the converter that names adapters reads the attention geometry build() uses
+    hidden_size = 256
+    num_attention_heads = 8
+    num_query_groups = 4
+    kv_channels = 32
+    num_layers = 2
+    indexer_rope_interleave = False
     overlap_param_gather = False
     moe_shared_expert_overlap = False
     overlap_grad_reduce = False
@@ -198,7 +206,11 @@ def main():
     label = f"TP{a.tp}{'+SP' if a.sp else ''}{'+MLA' if a.mla else ''}{'+GATE' if a.gate else ''}"
     if a.mla:
         Args.hf_lora_targets = Args.mla_hf_lora_targets
-    Args.hf_checkpoint = _write_config_only_checkpoint("deepseek_v3" if a.mla else "qwen3")
+    model_type = "deepseek_v3" if a.mla else ("qwen3_5" if a.gate else "qwen3")
+    Args.hf_checkpoint = _write_config_only_checkpoint(model_type)
+    Args.model_name = model_type.replace("_v3", "v3")
+    if a.mla:
+        Args.num_query_groups = Args.num_attention_heads
     n_mods_per_layer, n_tensors_per_layer = (7, 16) if a.mla else (4, 14)
 
     torch.manual_seed(7)

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from miles.utils.lora.hf_lora_targets import resolve_hf_lora_targets
 from miles.utils.lora.utils import lora_rollout_enabled, matches_lora_target
+from miles_plugins.lora.naming import DeclaredNaming
 from miles_plugins.lora.spec.attention import (
     GQAAttentionSpec,
     HybridGQAGDNAttentionSpec,
@@ -19,18 +20,20 @@ from miles_plugins.lora.spec.attention import (
 from miles_plugins.lora.spec.base import FixedTargets, LoRAArchSpec
 from miles_plugins.lora.spec.layout import AttentionSpecBase
 from miles_plugins.lora.spec.lm_head import InklingLMHeadSpec
-from miles_plugins.lora.spec.mlp import FusedGatedMLPSpec, InklingDenseMLPSpec
+from miles_plugins.lora.spec.mlp import FusedGatedMLPSpec, FusedGateUpMLPSpec
 from miles_plugins.lora.spec.moe import GroupedExpertsSpec
 
 logger = logging.getLogger(__name__)
 
 
-def _arch_spec(attention: AttentionSpecBase, *, allows_mixer_only_adapter_chunks: bool = False) -> LoRAArchSpec:
+def _arch_spec(
+    attention: AttentionSpecBase, *, mlp=None, allows_mixer_only_adapter_chunks: bool = False
+) -> LoRAArchSpec:
     return LoRAArchSpec(
         name=attention.name,
         model_family=attention.family,
         attention=attention,
-        mlp=FusedGatedMLPSpec(),
+        mlp=mlp or FusedGatedMLPSpec(),
         allows_mixer_only_adapter_chunks=allows_mixer_only_adapter_chunks,
     )
 
@@ -41,9 +44,19 @@ def _inkling_arch_spec() -> LoRAArchSpec:
         name=attention.name,
         model_family=attention.family,
         attention=attention,
-        mlp=InklingDenseMLPSpec(),
-        experts=GroupedExpertsSpec(block="mlp.experts."),
+        mlp=FusedGateUpMLPSpec(),
+        experts=GroupedExpertsSpec(),
         lm_head=InklingLMHeadSpec(),
+        # SGLang serves Inkling under its own module names, which its converter does not produce
+        declared_naming=DeclaredNaming(
+            "model.llm.layers.",
+            {
+                "self_attention.": "attn.",
+                "mlp.": "mlp.",
+                "mlp.experts.": "mlp.experts.",
+                "mlp.shared_experts.": "mlp.shared_experts.",
+            },
+        ),
         # TML export names are not HF targets; SGLang auto-detects them.
         fixed_targets=FixedTargets(serving=lambda _targets: "all-linear", select_all=True),
     )
@@ -56,7 +69,7 @@ def _kimi_k3_arch_spec() -> LoRAArchSpec:
         model_family=attention.family,
         attention=attention,
         mlp=FusedGatedMLPSpec(),
-        experts=GroupedExpertsSpec(block="block_sparse_moe.experts."),
+        experts=GroupedExpertsSpec(),
         # the routed-expert down-proj may be omitted: its EP-shared w2_lora_B dominates adapter growth (#1559)
         fixed_targets=FixedTargets(
             serving=_shared_outer_serving_targets, optional=frozenset({"block_sparse_moe.experts.*.w2"})
@@ -71,17 +84,18 @@ def _shared_outer_serving_targets(targets: list[str]) -> list[str]:
 
 def _build_model_specs() -> dict[str, LoRAArchSpec]:
     gqa = _arch_spec(GQAAttentionSpec())
+    # HF GLM-4 keeps gate/up fused in one gate_up_proj module
+    glm4 = _arch_spec(GQAAttentionSpec(), mlp=FusedGateUpMLPSpec())
     mla = _arch_spec(MLAAttentionSpec())
     hybrid = _arch_spec(HybridGQAGDNAttentionSpec(), allows_mixer_only_adapter_chunks=True)
     inkling = _inkling_arch_spec()
     return {
         "llama": gqa,
         "qwen2": gqa,
-        "qwen2_moe": gqa,
         "qwen3": gqa,
         "qwen3_moe": gqa,
         "mimo": gqa,
-        "glm4": gqa,
+        "glm4": glm4,
         "glm4_moe": gqa,
         "qwen3_5": hybrid,
         "qwen3_5_moe": hybrid,

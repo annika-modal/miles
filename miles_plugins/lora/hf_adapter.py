@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import collections
-import json
 import logging
 import os
 import re
@@ -17,68 +15,6 @@ from miles_plugins.lora.modules.linear import NativeLoRAAdapter, iter_adapters
 from miles_plugins.lora.spec.base import ShardLayout
 
 logger = logging.getLogger(__name__)
-
-
-def resolve_hf_naming(hf_checkpoint: str | None) -> tuple[str, str]:
-    """Read decoder-layer and shared-expert prefixes from the served checkpoint.
-
-    Falls back to the common HF spelling (``model.layers.`` /
-    ``mlp.shared_expert.``) when the checkpoint has no weight index.
-    """
-    default_layer_prefix, default_shared_expert = "model.layers.", "mlp.shared_expert."
-    index_path = os.path.join(hf_checkpoint or "", "model.safetensors.index.json")
-    if not os.path.exists(index_path):
-        return default_layer_prefix, default_shared_expert
-    with open(index_path) as handle:
-        names = json.load(handle).get("weight_map", {})
-
-    prefixes: collections.Counter[str] = collections.Counter()
-    shared_blocks: collections.Counter[str] = collections.Counter()
-    for name in names:
-        if "mtp" in name.split(".") or "vision" in name:
-            continue
-        match = re.match(r"^((?:[\w.]+\.)?layers\.)\d+\.(?:(\w+\.shared_experts?\.))?", name)
-        if match:
-            prefixes[match.group(1)] += 1
-            if match.group(2):
-                shared_blocks[match.group(2)] += 1
-    layer_prefix = prefixes.most_common(1)[0][0] if prefixes else default_layer_prefix
-    shared = shared_blocks.most_common(1)[0][0] if shared_blocks else default_shared_expert
-    return layer_prefix, shared
-
-
-def _layer_prefix_from_mapping(mapping: dict) -> str | None:
-    """Return the decoder-layer prefix declared by an mbridge mapping table."""
-    for hf_names in mapping.values():
-        names = hf_names if isinstance(hf_names, (list, tuple)) else [hf_names]
-        for name in names:
-            match = re.match(r"^((?:[\w.]+\.)?layers\.)\{layer_number\}", str(name))
-            if match:
-                return match.group(1)
-    return None
-
-
-def mbridge_cross_check(model_type: str | None, layer_prefix: str) -> None:
-    """Warn if optional mbridge conversion metadata disagrees with HF naming."""
-    if not model_type:
-        return
-    try:
-        import miles_plugins.mbridge  # noqa: F401  (registers Miles bridge subclasses)
-        from mbridge.core.bridge import _MODEL_REGISTRY
-    except ImportError:
-        return
-    bridge_cls = _MODEL_REGISTRY.get(model_type)
-    if bridge_cls is None:
-        return
-    expected = _layer_prefix_from_mapping(getattr(bridge_cls, "_ATTENTION_MAPPING", None) or {})
-    if expected is not None and expected != layer_prefix:
-        logger.warning(
-            "[lora-native] adapter layer prefix %r (from the checkpoint weight index) disagrees with "
-            "mbridge's %s mapping (%r); trusting the checkpoint.",
-            layer_prefix,
-            model_type,
-            expected,
-        )
 
 
 def export_lora_hf_named(model_chunks) -> list[tuple[str, torch.Tensor]]:

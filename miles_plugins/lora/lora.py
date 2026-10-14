@@ -7,12 +7,10 @@ import logging
 import torch.nn as nn
 
 from miles_plugins.lora.config import LoRAConfig
-from miles_plugins.lora.hf_adapter import (
-    export_lora_hf_named,
-    load_lora_adapter_hf,
-    mbridge_cross_check,
-    resolve_hf_naming,
-)
+from miles.backends.megatron_utils.megatron_to_hf import converter_model_name
+from miles.utils.hf_utils.config import load_hf_config
+from miles_plugins.lora.hf_adapter import export_lora_hf_named, load_lora_adapter_hf
+from miles_plugins.lora.naming import ConverterNaming
 from miles_plugins.lora.registry import resolve_checkpoint_spec
 from miles_plugins.lora.sglang_adapter import export_lora_sglang_named
 from miles_plugins.lora.spec.base import AttachContext, LoRAArchSpec
@@ -25,7 +23,6 @@ def apply_native_lora(model, args):
     model_type, arch_spec = resolve_checkpoint_spec(args.hf_checkpoint)
     context = _resolve_attach_context(args, model.config, arch_spec)
     arch_spec.validate(context)
-    mbridge_cross_check(model_type, context.layer_prefix)
 
     for parameter in model.parameters():
         parameter.requires_grad = False
@@ -67,44 +64,39 @@ def wrap_model_provider_with_lora(provider_func, args):
 def _resolve_attach_context(args, transformer_config, arch_spec: LoRAArchSpec) -> AttachContext:
     from megatron.core import parallel_state as ps
 
-    layer_prefix, shared_expert = resolve_hf_naming(args.hf_checkpoint)
+    tp_size = ps.get_tensor_model_parallel_world_size()
+    naming = arch_spec.declared_naming or ConverterNaming(
+        args, converter_model_name(args, load_hf_config(args.hf_checkpoint)), tp_size
+    )
     return AttachContext(
         lora=LoRAConfig.from_args(
             args, select_all=arch_spec.fixed_targets is not None and arch_spec.fixed_targets.select_all
         ),
         transformer_config=transformer_config,
-        tp_size=ps.get_tensor_model_parallel_world_size(),
+        tp_size=tp_size,
         tp_rank=ps.get_tensor_model_parallel_rank(),
-        layer_prefix=layer_prefix,
-        shared_expert=shared_expert,
+        naming=naming,
     )
 
 
 def _attach_layer(layer: nn.Module, arch_spec: LoRAArchSpec, context: AttachContext) -> int:
-    hf_layer = f"{context.layer_prefix}{layer.layer_number - 1}."
-    wrapped = _attach_attention(layer.self_attention, hf_layer, arch_spec, context)
+    attention = layer.self_attention
+    # Hybrid GDN mixer layers have no fused qkv; any other miss means the registry disagrees with the model.
+    assert arch_spec.allows_mixer_only_adapter_chunks or arch_spec.attention.applies_to(attention), (
+        f"native LoRA's {arch_spec.name} spec does not apply to layer {layer.layer_number - 1}'s "
+        f"{type(attention).__name__}; the built attention module does not match the registered architecture."
+    )
+    wrapped = arch_spec.attention.attach(attention, layer, context)
 
     # the MLP layout applies to a dense MLP or an MLP-shaped shared expert, not to the MoE block itself
     mlp = layer.mlp
-    wrapped += arch_spec.mlp.attach(mlp, f"{hf_layer}mlp.", context)
+    wrapped += arch_spec.mlp.attach(mlp, layer, context)
     shared = getattr(mlp, "shared_experts", None)  # absent on dense layers and MoEs without shared experts
     if shared is not None:
-        wrapped += arch_spec.mlp.attach(shared, f"{hf_layer}{context.shared_expert}", context)
+        wrapped += arch_spec.mlp.attach(shared, layer, context)
     if arch_spec.experts is not None:
-        wrapped += arch_spec.experts.attach(mlp, hf_layer, context)
+        wrapped += arch_spec.experts.attach(mlp, layer, context)
     return wrapped
-
-
-def _attach_attention(attention: nn.Module, hf_layer: str, arch_spec: LoRAArchSpec, context: AttachContext) -> int:
-    hf_prefix = f"{hf_layer}{arch_spec.attention.hf_block}."
-    attached = arch_spec.attention.attach(attention, hf_prefix, context)
-    selected = sorted(name for name in arch_spec.attention.supported_targets if context.selects(hf_prefix + name))
-    # Hybrid GDN mixer layers have no fused qkv; any other miss means the registry disagrees with the model.
-    assert attached or not selected or arch_spec.allows_mixer_only_adapter_chunks, (
-        f"native LoRA's {arch_spec.name} spec attached none of {selected} at {hf_prefix!r}; "
-        "the built attention module does not match the registered architecture."
-    )
-    return attached
 
 
 def _require_grad_on_first_activation(model) -> nn.Module | None:

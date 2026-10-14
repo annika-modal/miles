@@ -165,30 +165,36 @@ class ModuleLayout:
         return frozenset(projection.hf for group in self.fused for projection in group.projections)
 
 
-def attach_layout(block: nn.Module, layout: ModuleLayout, hf_prefix: str, context: AttachContext) -> int:
-    """Attach every targeted projection of ``layout`` to ``block``; return the adapter count."""
-    if layout.present_when_attr is not None and not hasattr(block, layout.present_when_attr):
+def layout_applies_to(block: nn.Module, layout: ModuleLayout) -> bool:
+    return layout.present_when_attr is None or hasattr(block, layout.present_when_attr)
+
+
+def attach_layout(block: nn.Module, layout: ModuleLayout, layer: nn.Module, context: AttachContext) -> int:
+    """Attach every targeted projection of ``layout`` to ``block`` inside ``layer``; return the adapter count."""
+    if not layout_applies_to(block, layout):
         return 0
     if layout.full_sequence:
         context = dataclasses.replace(context, full_sequence=True)
 
     count = 0
     for group in layout.fused:
+        host = getattr(block, group.module_attr)
+        hf_prefix = context.naming.block_prefix(layer, host.weight, [projection.hf for projection in group.projections])
         active = tuple(
             projection for projection in group.projections if context.selects(f"{hf_prefix}{projection.hf}")
         )
         if not active:
             continue
-        host = getattr(block, group.module_attr)
         adapter = group.build(block, hf_prefix, context, active, group.projections)
         setattr(block, group.adapter_attr, adapter)
         attach_adapter_forward(host, adapter, context.scale)
         count += 1
 
     for binding in layout.singles:
+        host = getattr(block, binding.module_attr)
+        hf_prefix = context.naming.block_prefix(layer, host.weight, [binding.projection.hf])
         if not context.selects(f"{hf_prefix}{binding.projection.hf}"):
             continue
-        host = getattr(block, binding.module_attr)
         out_features = binding.out_dim(block, context)
         if binding.guard is not None:
             binding.guard(host, context, binding.projection, out_features)
@@ -233,8 +239,11 @@ class LayoutSpec:
         names.extend(binding.projection.hf for binding in self.layout.singles)
         return ",".join(names)
 
-    def attach(self, block: nn.Module, hf_prefix: str, context: AttachContext) -> int:
-        return attach_layout(block, self.layout, hf_prefix, context)
+    def applies_to(self, block: nn.Module) -> bool:
+        return layout_applies_to(block, self.layout)
+
+    def attach(self, block: nn.Module, layer: nn.Module, context: AttachContext) -> int:
+        return attach_layout(block, self.layout, layer, context)
 
     def serving_fused_families(self) -> list[frozenset[str]]:
         """Projection families SGLang stores in one fused buffer for this layout."""

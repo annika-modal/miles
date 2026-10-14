@@ -53,8 +53,7 @@ class AttachContext:
     transformer_config: Any
     tp_size: int
     tp_rank: int
-    layer_prefix: str
-    shared_expert: str
+    naming: Any
     full_sequence: bool = False
 
     @property
@@ -99,7 +98,9 @@ class AttentionLoRASpec(Protocol):
 
     def validate(self, config, *, tp_size: int) -> None: ...
 
-    def attach(self, attention: nn.Module, hf_prefix: str, context: AttachContext) -> int: ...
+    def applies_to(self, attention: nn.Module) -> bool: ...
+
+    def attach(self, attention: nn.Module, layer: nn.Module, context: AttachContext) -> int: ...
 
 
 class MLPLoRASpec(Protocol):
@@ -108,13 +109,13 @@ class MLPLoRASpec(Protocol):
     name: str
     supported_targets: frozenset[str]
 
-    def attach(self, mlp: nn.Module, hf_prefix: str, context: AttachContext) -> int: ...
+    def attach(self, mlp: nn.Module, layer: nn.Module, context: AttachContext) -> int: ...
 
 
 class ExpertsLoRASpec(Protocol):
     """Routed-expert attachment for architectures whose experts carry adapters."""
 
-    def attach(self, mlp: nn.Module, hf_layer_prefix: str, context: AttachContext) -> int: ...
+    def attach(self, mlp: nn.Module, layer: nn.Module, context: AttachContext) -> int: ...
 
 
 _HF_LAYER = r"(?:^|\.)layers\.(?:\d+|\*)\."
@@ -148,6 +149,8 @@ class LoRAArchSpec:
     lm_head: Any = None
     allows_mixer_only_adapter_chunks: bool = False
     fixed_targets: FixedTargets | None = None
+    # None names adapters after the raw-mode converter's HF weight names
+    declared_naming: Any = None
 
     def attaches(self, hf_module: str) -> bool:
         """Whether this spec implements an adapter for the HF module (``*`` stands for any layer)."""

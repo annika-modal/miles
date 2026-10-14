@@ -14,6 +14,7 @@ from miles_plugins.lora.registry import resolve_adapter_targets as _resolve_adap
 from miles_plugins.lora.registry import validate_native_lora_args
 from miles_plugins.lora.spec.attention import GQAAttentionSpec, MLAAttentionSpec
 from miles_plugins.lora.spec.base import AttachContext
+from tests.fast.miles_plugins.lora.naming_stub import named
 
 
 def _assert_supported_architecture(config, tp_size: int = 1) -> None:
@@ -192,21 +193,20 @@ class TestAttachWalk:
             transformer_config=SimpleNamespace(hidden_size=8, sequence_parallel=False, layernorm_epsilon=1e-5),
             tp_size=1,
             tp_rank=0,
-            layer_prefix="model.layers.",
-            shared_expert="mlp.shared_experts.",
+            naming=None,
         )
 
     def test_layer_scoped_target_attaches_only_that_layer(self):
         context = self._context(("model.layers.0.self_attn.o_proj",))
         layer0, layer1 = _gqa_attention(), _gqa_attention()
-        assert GQAAttentionSpec().attach(layer0, "model.layers.0.self_attn.", context) == 1
-        assert GQAAttentionSpec().attach(layer1, "model.layers.1.self_attn.", context) == 0
+        assert GQAAttentionSpec().attach(layer0, None, named(context, "model.layers.0.self_attn.")) == 1
+        assert GQAAttentionSpec().attach(layer1, None, named(context, "model.layers.1.self_attn.")) == 0
         assert hasattr(layer0, "lora_o_adapter") and not hasattr(layer0, "lora_qkv_adapter")
         assert not hasattr(layer1, "lora_o_adapter")
 
     def test_partial_fused_selection_builds_a_split_adapter_for_the_selected_rows(self):
         attention = _gqa_attention()
-        GQAAttentionSpec().attach(attention, "model.layers.0.self_attn.", self._context(("q_proj",)))
+        GQAAttentionSpec().attach(attention, None, named(self._context(("q_proj",)), "model.layers.0.self_attn."))
         assert [projection.hf for projection in attention.lora_qkv_adapter.projection_specs] == ["q_proj"]
 
     def test_a_renamed_host_in_an_applicable_block_fails_instead_of_dropping_its_adapter(self):
@@ -216,14 +216,14 @@ class TestAttachWalk:
         del attention.linear_proj
 
         with pytest.raises(AttributeError, match="linear_proj"):
-            GQAAttentionSpec().attach(attention, "model.layers.0.self_attn.", self._context(None))
+            GQAAttentionSpec().attach(attention, None, named(self._context(None), "model.layers.0.self_attn."))
 
     def test_a_block_the_layout_does_not_apply_to_attaches_nothing(self):
         """A hybrid model's mixer layer has no fused qkv; the GQA layout does not apply to it."""
         mixer = nn.Module()
         mixer.out_proj = _Linear(8, 8)
 
-        assert GQAAttentionSpec().attach(mixer, "model.layers.0.self_attn.", self._context(None)) == 0
+        assert GQAAttentionSpec().attach(mixer, None, named(self._context(None), "model.layers.0.self_attn.")) == 0
 
 
 def _native_run_args(tmp_path, model_type, **overrides):

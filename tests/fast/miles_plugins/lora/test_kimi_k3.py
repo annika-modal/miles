@@ -16,6 +16,7 @@ from miles_plugins.lora.modules.moe import _grouped_linear
 from miles_plugins.lora.registry import MODEL_SPECS, resolve_adapter_targets
 from miles_plugins.lora.sglang_adapter import export_lora_sglang_named
 from miles_plugins.lora.spec.base import AttachContext
+from tests.fast.miles_plugins.lora.naming_stub import named
 
 HIDDEN, LATENT, RANK = 8, 6, 2
 PREFIX = "language_model.model.layers."
@@ -89,8 +90,7 @@ def _context(targets=None, *, sequence_parallel=False, tp_size=1, tp_rank=0):
         ),
         tp_size=tp_size,
         tp_rank=tp_rank,
-        layer_prefix=PREFIX,
-        shared_expert="block_sparse_moe.shared_experts.",
+        naming=None,
     )
 
 
@@ -120,11 +120,11 @@ def _model(*, include_fc2=True, sequence_parallel=False):
     context = _context(tuple(targets), sequence_parallel=sequence_parallel)
     model = nn.Module()
     model.mla, model.dense, model.kda, model.moe = _attention(False), _mlp(), _attention(True), _moe()
-    K3.attention.attach(model.mla, f"{PREFIX}3.self_attn.", context)
-    K3.mlp.attach(model.dense, f"{PREFIX}3.mlp.", context)
-    K3.attention.attach(model.kda, f"{PREFIX}4.self_attn.", context)
-    K3.experts.attach(model.moe, f"{PREFIX}4.", context)
-    K3.mlp.attach(model.moe.shared_experts, f"{PREFIX}4.block_sparse_moe.shared_experts.", context)
+    K3.attention.attach(model.mla, None, named(context, f"{PREFIX}3.self_attn."))
+    K3.mlp.attach(model.dense, None, named(context, f"{PREFIX}3.mlp."))
+    K3.attention.attach(model.kda, None, named(context, f"{PREFIX}4.self_attn."))
+    K3.experts.attach(model.moe, None, named(context, f"{PREFIX}4.block_sparse_moe.experts."))
+    K3.mlp.attach(model.moe.shared_experts, None, named(context, f"{PREFIX}4.block_sparse_moe.shared_experts."))
     _randomize(model)
     return model
 
@@ -301,7 +301,7 @@ def test_kda_o_proj_delta_stays_a_partial_sum(monkeypatch):
         columns = slice(tp_rank * 12 // tp_size, (tp_rank + 1) * 12 // tp_size)
         attention = _attention(True, tp_size=tp_size)
         context = _context((f"{PREFIX}*.self_attn.o_proj",), tp_size=tp_size, tp_rank=tp_rank)
-        assert K3.attention.attach(attention, f"{PREFIX}4.self_attn.", context) == 1
+        assert K3.attention.attach(attention, None, named(context, f"{PREFIX}4.self_attn.")) == 1
         adapter = attention.linear_attn.lora_o_adapter
         assert adapter.o_B._lora_grad_sum_group == "tp"
         with torch.no_grad():

@@ -208,10 +208,13 @@ class KimiK3AttentionSpec(AttentionSpecBase):
         ),
     )
 
-    def attach(self, block: nn.Module, hf_prefix: str, context: AttachContext) -> int:
+    def applies_to(self, block: nn.Module) -> bool:
+        return True
+
+    def attach(self, block: nn.Module, layer: nn.Module, context: AttachContext) -> int:
         if block.is_kda:
-            return attach_layout(block.linear_attn, self.kda_layout, hf_prefix, context)
-        return attach_layout(block, self.layout, hf_prefix, context)
+            return attach_layout(block.linear_attn, self.kda_layout, layer, context)
+        return attach_layout(block, self.layout, layer, context)
 
 
 class HybridGQAGDNAttentionSpec(GQAAttentionSpec):

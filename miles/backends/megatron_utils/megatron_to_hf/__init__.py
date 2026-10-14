@@ -34,6 +34,16 @@ def convert_to_hf(args, model_name, name, param, quantization_config=None, packe
 
 
 # TODO optimize code details
+def converter_model_name(args, hf_config) -> str:
+    """The model name the converters dispatch on."""
+    return type(hf_config).__name__.lower() if args.model_name is None else args.model_name
+
+
+def convert_to_hf_names(args, model_name, name, param) -> list[str]:
+    """HF weight names the converter gives a Megatron param; ``param`` may be a meta tensor of its global shape."""
+    return [hf_name for hf_name, _ in _convert_to_hf_core(args, model_name, name, param)]
+
+
 def _convert_to_hf_core(args, model_name, name, param):
     model_name = model_name.lower()
     if "glm5_next" in model_name or "glm5next" in model_name:

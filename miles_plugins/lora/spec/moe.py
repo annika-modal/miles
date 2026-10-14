@@ -15,53 +15,53 @@ from miles_plugins.lora.spec.base import AttachContext
 class GroupedExpertsSpec:
     """Shared-outer routed experts (shared A / per-expert B for gate/up, the reverse for down).
 
-    ``block`` is the HF name of the routed-expert block under a layer. The adapter widths
-    come from the grouped host weights, so latent MoEs need no extra table entry. Shared
-    experts stored as a list of sub-experts get one adapter over all of them here; a plain
-    shared-expert MLP is adapted by the architecture's MLP spec instead.
+    The adapter widths come from the grouped host weights, so latent MoEs need no extra
+    table entry. Shared experts stored as a list of sub-experts get one adapter over all of
+    them here; a plain shared-expert MLP is adapted by the architecture's MLP spec instead.
     """
 
-    def __init__(self, block: str):
-        self.block = block
-
-    def attach(self, mlp: nn.Module, hf_prefix: str, context: AttachContext) -> int:
+    def attach(self, mlp: nn.Module, layer: nn.Module, context: AttachContext) -> int:
         from megatron.core import parallel_state
 
         if not hasattr(mlp, "experts"):
             return 0
         config = mlp.config
         experts = mlp.experts
-        prefix = hf_prefix + self.block
+        fc1, fc2 = experts.linear_fc1, experts.linear_fc2
         common = dict(
-            hf_prefix=prefix,
             context=context,
             num_local_experts=experts.num_local_experts,
             moe_intermediate=config.moe_ffn_hidden_size,
             is_ep=parallel_state.get_expert_model_parallel_world_size() > 1,
         )
         count = 0
-        if context.selects(f"{prefix}0.w1") or context.selects(f"{prefix}0.w3"):
-            fc1 = experts.linear_fc1
-            experts.lora_fc1_adapter = LoRAGroupedFC1(reference=fc1.weight0, width=fc1.weight0.shape[1], **common)
+        fc1_prefix = context.naming.block_prefix(layer, fc1.weight0, ["w1", "w3"])
+        # selectors address one expert ("experts.*.w1"); shared-outer adapters cover them all
+        if context.selects(f"{fc1_prefix}0.w1") or context.selects(f"{fc1_prefix}0.w3"):
+            experts.lora_fc1_adapter = LoRAGroupedFC1(
+                hf_prefix=fc1_prefix, reference=fc1.weight0, width=fc1.weight0.shape[1], **common
+            )
             attach_adapter_forward(fc1, experts.lora_fc1_adapter, context.scale)
             count += 1
-        if context.selects(f"{prefix}0.w2"):
-            fc2 = experts.linear_fc2
-            experts.lora_fc2_adapter = LoRAGroupedFC2(reference=fc2.weight0, width=fc2.weight0.shape[0], **common)
+        fc2_prefix = context.naming.block_prefix(layer, fc2.weight0, ["w2"])
+        if context.selects(f"{fc2_prefix}0.w2"):
+            experts.lora_fc2_adapter = LoRAGroupedFC2(
+                hf_prefix=fc2_prefix, reference=fc2.weight0, width=fc2.weight0.shape[0], **common
+            )
             attach_adapter_forward(fc2, experts.lora_fc2_adapter, context.scale)
             count += 1
 
-        shared = getattr(mlp, "shared_experts", None)
+        shared = getattr(mlp, "shared_experts", None)  # absent on MoEs without shared experts
         if shared is not None and hasattr(shared, "experts"):
-            count += self._attach_shared(shared, hf_prefix, context)
+            count += self._attach_shared(shared, layer, context)
         return count
 
     @staticmethod
-    def _attach_shared(shared: nn.Module, hf_prefix: str, context: AttachContext) -> int:
+    def _attach_shared(shared: nn.Module, layer: nn.Module, context: AttachContext) -> int:
         subs = list(shared.experts)
         local_intermediate = shared.experts[0].linear_fc1.weight.shape[0] // 2
         adapter = LoRASharedExpertsAdapter(
-            hf_prefix=hf_prefix + context.shared_expert,
+            hf_prefix=context.naming.block_prefix(layer, subs[0].linear_fc1.weight, ["w1", "w3", "w2"]),
             fc1_reference=subs[0].linear_fc1.weight,
             fc2_reference=subs[0].linear_fc2.weight,
             context=context,

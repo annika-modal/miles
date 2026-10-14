@@ -12,7 +12,8 @@ from miles_plugins.lora.modules.linear import attach_adapter_forward
 from miles_plugins.lora.modules.moe import LoRAGroupedFC1, LoRAGroupedFC2, LoRAOutputHead, _grouped_linear
 from miles_plugins.lora.spec.attention import GQAAttentionSpec, MLAAttentionSpec
 from miles_plugins.lora.spec.base import AttachContext
-from miles_plugins.lora.spec.mlp import FusedGatedMLPSpec, InklingDenseMLPSpec
+from tests.fast.miles_plugins.lora.naming_stub import named
+from miles_plugins.lora.spec.mlp import FusedGatedMLPSpec, FusedGateUpMLPSpec
 from miles_plugins.lora.spec.moe import GroupedExpertsSpec
 
 HIDDEN = 8
@@ -62,8 +63,7 @@ def _context(targets=None, *, output_gate=False, **config):
         transformer_config=transformer_config,
         tp_size=1,
         tp_rank=0,
-        layer_prefix="model.layers.",
-        shared_expert="mlp.shared_experts.",
+        naming=None,
     )
 
 
@@ -114,7 +114,7 @@ def _gqa_attention(heads=4, groups=2, head_dim=2, output_gate=False):
 def test_gqa_fused_qkv_and_row_parallel_o(output_gate, targets):
     module = nn.Module()
     module.attn = _gqa_attention(output_gate=output_gate)
-    GQAAttentionSpec().attach(module.attn, "model.layers.0.self_attn.", _context(targets, output_gate=output_gate))
+    GQAAttentionSpec().attach(module.attn, None, named(_context(targets, output_gate=output_gate), "model.layers.0.self_attn."))
     hosts = [("attn.linear_qkv", module.attn.linear_qkv)]
     if targets is None:
         hosts.append(("attn.linear_proj", module.attn.linear_proj))
@@ -132,19 +132,17 @@ def test_mla_replicated_and_column_projections():
     attention.linear_proj = _Linear(HIDDEN, 4)
     module = nn.Module()
     module.attn = attention
-    MLAAttentionSpec().attach(attention, "model.layers.0.self_attn.", _context(**config))
-    _assert_merge_matches_forward(
-        module, [(f"attn.{name}", getattr(attention, name)) for name in ("linear_q_down_proj", "linear_kv_up_proj")]
-    )
+    MLAAttentionSpec().attach(attention, None, named(_context(**config), "model.layers.0.self_attn."))
+    _assert_merge_matches_forward(module, [(f"attn.{name}", getattr(attention, name)) for name in ("linear_q_down_proj", "linear_kv_up_proj")])
 
 
-@pytest.mark.parametrize("spec", [FusedGatedMLPSpec(), InklingDenseMLPSpec()], ids=["split-gate-up", "tml-fused"])
+@pytest.mark.parametrize("spec", [FusedGatedMLPSpec(), FusedGateUpMLPSpec()], ids=["split-gate-up", "fused-gate-up"])
 def test_gated_mlp(spec):
     mlp = nn.Module()
     mlp.linear_fc1, mlp.linear_fc2 = _Linear(10, HIDDEN, fused_norm=True), _Linear(HIDDEN, 5)
     module = nn.Module()
     module.mlp = mlp
-    spec.attach(mlp, "model.layers.0.mlp.", _context())
+    spec.attach(mlp, None, named(_context(), "model.layers.0.mlp."))
     _assert_merge_matches_forward(module, [("mlp.linear_fc1", mlp.linear_fc1), ("mlp.linear_fc2", mlp.linear_fc2)])
 
 
@@ -159,9 +157,7 @@ def test_grouped_routed_experts():
     attach_adapter_forward(experts.linear_fc2, experts.lora_fc2_adapter, context.scale)
     module = nn.Module()
     module.experts = experts
-    _assert_merge_matches_forward(
-        module, [("experts.linear_fc1", experts.linear_fc1), ("experts.linear_fc2", experts.linear_fc2)], [2, 2, 1]
-    )
+    _assert_merge_matches_forward(module, [("experts.linear_fc1", experts.linear_fc1), ("experts.linear_fc2", experts.linear_fc2)], [2, 2, 1])
 
 
 def test_inkling_shared_sub_experts():
@@ -171,16 +167,12 @@ def test_inkling_shared_sub_experts():
         sub = nn.Module()
         sub.linear_fc1, sub.linear_fc2 = _Linear(10, HIDDEN), _Linear(HIDDEN, 5)
         shared.experts.append(sub)
-    GroupedExpertsSpec._attach_shared(shared, "model.layers.1.", _context())
+    GroupedExpertsSpec._attach_shared(shared, None, named(_context(), "model.layers.1.mlp.shared_experts."))
     module = nn.Module()
     module.shared = shared
     _assert_merge_matches_forward(
         module,
-        [
-            (f"shared.experts.{index}.{name}", getattr(shared.experts[index], name))
-            for index in range(2)
-            for name in ("linear_fc1", "linear_fc2")
-        ],
+        [(f"shared.experts.{index}.{name}", getattr(shared.experts[index], name)) for index in range(2) for name in ("linear_fc1", "linear_fc2")],
     )
 
 
@@ -215,7 +207,7 @@ def test_merge_refuses_a_host_weight_that_is_not_exported():
     module = nn.Module()
     module.mlp = nn.Module()
     module.mlp.linear_fc1, module.mlp.linear_fc2 = _Linear(10, HIDDEN), _Linear(HIDDEN, 5)
-    FusedGatedMLPSpec().attach(module.mlp, "model.layers.0.mlp.", _context())
+    FusedGatedMLPSpec().attach(module.mlp, None, named(_context(), "model.layers.0.mlp."))
     with pytest.raises(AssertionError, match="not exported"):
         merge_lora_into_weights([module], {"mlp.linear_fc1.weight": module.mlp.linear_fc1.weight})
 
@@ -225,7 +217,7 @@ def test_unadapted_weights_pass_through_untouched():
     module.mlp = nn.Module()
     module.mlp.linear_fc1, module.mlp.linear_fc2 = _Linear(10, HIDDEN), _Linear(HIDDEN, 5)
     module.norm = nn.Parameter(torch.ones(HIDDEN))
-    FusedGatedMLPSpec().attach(module.mlp, "model.layers.0.mlp.", _context(("down_proj",)))
+    FusedGatedMLPSpec().attach(module.mlp, None, named(_context(("down_proj",)), "model.layers.0.mlp."))
     merged = _merged(module)
     assert merged["norm"] is module.norm
     assert merged["mlp.linear_fc1.weight"] is module.mlp.linear_fc1.weight

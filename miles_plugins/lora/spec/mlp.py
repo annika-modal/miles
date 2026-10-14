@@ -63,7 +63,7 @@ class FusedGatedMLPSpec(LayoutSpec):
     )
 
 
-class _InklingFusedFC1(LoRALinear):
+class LoRAFusedGateUp(LoRALinear):
     """Fused gate/up as ONE projection: local B stacks [gate_loc; up_loc].
 
     A plain dim-0 TP gather of B would interleave the ranks' halves, so export
@@ -99,12 +99,12 @@ def _fc1_full_local(mlp: nn.Module, _context: AttachContext) -> int:
     return mlp.linear_fc1.weight.shape[0]
 
 
-class InklingDenseMLPSpec(LayoutSpec):
-    """Fused gate/up as a single TML-named projection, plus the down projection."""
+class FusedGateUpMLPSpec(LayoutSpec):
+    """An HF MLP whose gate/up is one ``gate_up_proj`` module (GLM-4, Inkling), plus the down projection."""
 
-    name = "inkling_dense_mlp"
+    name = "fused_gate_up_mlp"
     layout = ModuleLayout(
-        name="inkling_dense_mlp",
+        name="fused_gate_up_mlp",
         present_when_attr="linear_fc1",
         singles=(
             ProjectionBinding(
@@ -113,7 +113,7 @@ class InklingDenseMLPSpec(LayoutSpec):
                 in_dim=L.hidden,
                 out_dim=_fc1_full_local,
                 adapter_attr="lora_fc1_adapter",
-                adapter_class=_InklingFusedFC1,
+                adapter_class=LoRAFusedGateUp,
             ),
             ProjectionBinding(
                 projection=ProjectionSpec("down_proj", "fc2", ShardLayout.ROW),
