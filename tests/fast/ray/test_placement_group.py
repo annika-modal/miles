@@ -107,18 +107,15 @@ class TestFrozenInferenceChecksums:
         monkeypatch.setattr(placement_group_module, "is_event_logger_initialized", lambda: True)
         event_logger = MagicMock()
         monkeypatch.setattr(placement_group_module, "get_event_logger", lambda: event_logger)
-        controller = SimpleNamespace(check_weights=AsyncMock(return_value=[]))
-
-        await placement_group_module._maybe_log_inference_engine_weight_checksums(
+        placement_group_module._log_inference_engine_weight_checksums(
             _make_args(log_inference_engine_weight_checksums=True),
-            inference_controller=controller,
+            checksum_results=[],
             rollout_id=None,
             trainer_model_id=None,
             output=WeightUpdateOutput(weight_version=1, failed_cell_ids=()),
             snapshot_cell_id_to_hashes={},
         )
 
-        controller.check_weights.assert_awaited_once()
         event_logger.log.assert_not_called()
 
 
