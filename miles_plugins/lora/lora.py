@@ -82,17 +82,13 @@ def _resolve_attach_context(args, transformer_config, arch_spec: LoRAArchSpec) -
 
 def _attach_layer(layer: nn.Module, arch_spec: LoRAArchSpec, context: AttachContext) -> int:
     hf_layer = f"{context.layer_prefix}{layer.layer_number - 1}."
-    wrapped = 0
-    attention = getattr(layer, "self_attention", None)
-    if attention is not None:
-        wrapped += _attach_attention(attention, hf_layer, arch_spec, context)
+    wrapped = _attach_attention(layer.self_attention, hf_layer, arch_spec, context)
 
+    # the MLP layout applies to a dense MLP or an MLP-shaped shared expert, not to the MoE block itself
     mlp = layer.mlp
-    if hasattr(mlp, "linear_fc1"):
-        assert getattr(mlp.config, "gated_linear_unit", True), "native LoRA assumes a gated (SwiGLU) MLP"
-        wrapped += arch_spec.mlp.attach(mlp, f"{hf_layer}mlp.", context)
-    shared = getattr(mlp, "shared_experts", None)
-    if shared is not None and hasattr(shared, "linear_fc1"):
+    wrapped += arch_spec.mlp.attach(mlp, f"{hf_layer}mlp.", context)
+    shared = getattr(mlp, "shared_experts", None)  # absent on dense layers and MoEs without shared experts
+    if shared is not None:
         wrapped += arch_spec.mlp.attach(shared, f"{hf_layer}{context.shared_expert}", context)
     if arch_spec.experts is not None:
         wrapped += arch_spec.experts.attach(mlp, hf_layer, context)

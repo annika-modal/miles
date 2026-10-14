@@ -99,8 +99,8 @@ class ServingGroup:
 class ProjectionBinding:
     """One independently attachable projection and where it lives.
 
-    ``module_attr`` names the physical linear on the owning block; a missing
-    attribute skips the binding (hybrid blocks legitimately lack projections).
+    ``module_attr`` names the physical linear on the owning block; every block the
+    layout applies to (see ``ModuleLayout.present_when_attr``) must have it.
     ``adapter_attr`` fixes the adapter's registered name — it appears in
     checkpoint keys, so it is explicit rather than derived.
     """
@@ -139,6 +139,8 @@ class FusedAttach:
 class ModuleLayout:
     """The complete adapter table for one block kind of one architecture.
 
+    ``present_when_attr`` names the attribute that marks a block of this kind (a hybrid
+    model's mixer layers lack it); the layout applies to every block that has it.
     ``full_sequence`` marks a block that gathers the sequence-parallel input itself and
     runs its linears without SP, so its adapters follow the non-SP TP semantics.
     """
@@ -186,9 +188,7 @@ def attach_layout(block: nn.Module, layout: ModuleLayout, hf_prefix: str, contex
     for binding in layout.singles:
         if not context.selects(f"{hf_prefix}{binding.projection.hf}"):
             continue
-        host = getattr(block, binding.module_attr, None)
-        if host is None:
-            continue
+        host = getattr(block, binding.module_attr)
         out_features = binding.out_dim(block, context)
         if binding.guard is not None:
             binding.guard(host, context, binding.projection, out_features)

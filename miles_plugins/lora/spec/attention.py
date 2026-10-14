@@ -209,12 +209,9 @@ class KimiK3AttentionSpec(AttentionSpecBase):
     )
 
     def attach(self, block: nn.Module, hf_prefix: str, context: AttachContext) -> int:
-        block, layout = (block.linear_attn, self.kda_layout) if block.is_kda else (block, self.layout)
-        attached = attach_layout(block, layout, hf_prefix, context)
-        # attach_layout skips absent hosts; on K3 every selected projection exists, so a skip is a renamed host.
-        selected = sum(context.selects(f"{hf_prefix}{target}") for target in layout.targets)
-        assert attached == selected, f"Kimi K3 {layout.name}: attached {attached} of {selected} selected projections"
-        return attached
+        if block.is_kda:
+            return attach_layout(block.linear_attn, self.kda_layout, hf_prefix, context)
+        return attach_layout(block, self.layout, hf_prefix, context)
 
 
 class HybridGQAGDNAttentionSpec(GQAAttentionSpec):
