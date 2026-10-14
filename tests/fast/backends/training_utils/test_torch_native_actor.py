@@ -206,15 +206,16 @@ class TestFailedTargetStopsTraining:
         actor.weight_updater = MagicMock()
         actor.weight_updater.update_weights.return_value = True
         actor.weight_updater.protocol.cell_updaters_of_cell_id = {
-            cell_id: SimpleNamespace(is_errored=cell_id in failed_cell_ids)
-            for cell_id in ("cell-a", "cell-b")
+            cell_id: SimpleNamespace(is_errored=cell_id in failed_cell_ids) for cell_id in ("cell-a", "cell-b")
         }
         monkeypatch.setattr(base_module, "print_memory", lambda message: None)
 
         with pytest.raises(RuntimeError, match="TorchNative weight update failed") as raised:
             TorchNativeTrainRayActor.update_weights.__wrapped__(
-                actor, SimpleNamespace(rollout_engines=[object(), object()]),
-                debug_weight_update_id="update-4", rollout_id=1,
+                actor,
+                SimpleNamespace(rollout_engines=[object(), object()]),
+                debug_weight_update_id="update-4",
+                rollout_id=1,
             )
 
         assert all(cell_id in str(raised.value) for cell_id in failed_cell_ids)
