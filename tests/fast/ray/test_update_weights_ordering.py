@@ -575,9 +575,14 @@ class TestChecksumCollectionOwnsTheUpdateWindow:
             "miles.ray.placement_group.get_event_logger"
         ):
             async with asyncio.timeout(5):
-                update = asyncio.create_task(update_weights(
-                    args, _actor_model([]), SimpleNamespace(set_weight_version=AsyncMock()), controller,
-                ))
+                update = asyncio.create_task(
+                    update_weights(
+                        args,
+                        _actor_model([]),
+                        SimpleNamespace(set_weight_version=AsyncMock()),
+                        controller,
+                    )
+                )
                 contender = None
                 try:
                     await entered.wait()
