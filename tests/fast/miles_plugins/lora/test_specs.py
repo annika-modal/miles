@@ -261,3 +261,15 @@ def test_native_run_contract_accepts_its_validated_configs(tmp_path):
     validate_native_lora_args(_native_run_args(tmp_path, "kimi_k3", colocate=False, lora_train_only=True))
     # expert TP only matters for specs whose routed experts carry adapters
     validate_native_lora_args(_native_run_args(tmp_path, "qwen3_moe", expert_tensor_parallel_size=2))
+
+
+def test_inkling_head_export_rows_follow_sglangs_served_vocab(tmp_path):
+    """A missing or unreadable config must fail, not export the padded head SGLang cannot load."""
+    from miles_plugins.lora.spec.lm_head import _served_vocab_size
+
+    (tmp_path / "config.json").write_text(json.dumps({"text_config": {"vocab_size": 16, "unpadded_vocab_size": 12}}))
+    assert _served_vocab_size(str(tmp_path)) == 12
+    (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 16}))
+    assert _served_vocab_size(str(tmp_path)) is None
+    with pytest.raises(FileNotFoundError):
+        _served_vocab_size(str(tmp_path / "missing"))

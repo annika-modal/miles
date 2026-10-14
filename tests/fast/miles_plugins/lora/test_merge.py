@@ -9,7 +9,8 @@ import torch.nn as nn
 from miles_plugins.lora.config import LoRAConfig
 from miles_plugins.lora.merge import merge_lora_into_weights
 from miles_plugins.lora.modules.linear import attach_adapter_forward
-from miles_plugins.lora.modules.moe import LoRAGroupedFC1, LoRAGroupedFC2, LoRAOutputHead, _grouped_linear
+from miles_plugins.lora.modules.lm_head import LoRAOutputHead
+from miles_plugins.lora.modules.moe import LoRAGroupedFC1, LoRAGroupedFC2, _grouped_linear
 from miles_plugins.lora.spec.attention import GQAAttentionSpec, MLAAttentionSpec
 from miles_plugins.lora.spec.base import AttachContext
 from tests.fast.miles_plugins.lora.naming_stub import named
